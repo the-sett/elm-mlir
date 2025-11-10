@@ -1,8 +1,10 @@
 module Mlir.Mlir exposing
-    ( DenseF64, Dim(..), MlirAttr(..), MlirBlock, MlirModule
-    , MlirOp, MlirRegion(..), MlirType(..), Visibility(..)
-    , OpBuilderFns, OpBuilder, opBuilder
-    , DenseF64Value(..), mlirOp
+    ( MlirAttr(..)
+    , Dim(..), DenseF64, DenseF64Value(..), Visibility(..)
+    , MlirType(..)
+    , MlirOp
+    , MlirBlock, MlirRegion(..), MlirModule
+    , OpBuilderFns, OpBuilder, opBuilder, mlirOp
     )
 
 {-| MLIR models the MLIR SSA compiler representation. This can be used to build MLIR code for further
@@ -11,32 +13,99 @@ processing by the MLIR tool-chain and development system.
 
 # MLIR Model
 
-@docs DenseF64, Dim, Loc, MlirAttr, MlirBlock, MlirModule
-@docs MlirOp, MlirRegion, MlirType, Visibility
+
+## Atributes
+
+@docs MlirAttr
+@docs Dim, DenseF64, DenseF64Value, Visibility
+
+
+## Types
+
+@docs MlirType
+
+
+## Operations
+
+@docs MlirOp
+
+
+## Blocks, Regions and Modules
+
+@docs MlirBlock, MlirRegion, MlirModule
 
 
 # Builders
 
-@docs OpBuilderFns, OpBuilder, opBuilder
+@docs OpBuilderFns, OpBuilder, opBuilder, mlirOp
 
 -}
 
 import Dict exposing (Dict)
-import Loc exposing (Loc)
+import Mlir.Loc as Loc exposing (Loc)
 import OrderedDict exposing (OrderedDict)
 
 
+
+-- Attributes
+
+
+{-| Attributes are constant, known-value pieces of metadata attached to operations and functions.
+-}
+type MlirAttr
+    = StringAttr String
+    | BoolAttr Bool
+    | IntAttr Int
+    | FloatAttr Float
+    | TypeAttr MlirType
+    | ArrayAttr (List MlirAttr)
+    | DenseF64Attr { type_ : MlirType, payload : DenseF64 }
+    | SymbolRefAttr String
+    | VisibilityAttr Visibility
+    | UnitAttr
+
+
+{-| Function visibility attribute values.
+-}
 type Visibility
     = Public
     | Private
     | Nested
 
 
+{-| Array dimensions.
+-}
 type Dim
     = Static Int
     | Dynamic
 
 
+{-| Dense F64 values, such as tensors.
+-}
+type alias DenseF64 =
+    { shape : List Dim
+    , values : DenseF64Value
+    }
+
+
+{-| Dense F64 values, such as tensors.
+-}
+type DenseF64Value
+    = Scalar Float
+    | Tensor (List DenseF64Value)
+
+
+
+-- Types
+
+
+{-| MLIR uses an open type system, meaning there is no fixed, hardcoded list of all valid types.
+Instead, types are defined within specific dialects, which are modular extensions to the core MLIR
+framework.
+
+A hard-coded set of common types is provided here.
+
+-}
 type MlirType
     = I1
     | I8
@@ -54,30 +123,12 @@ type MlirType
     | UnrankedTensor MlirType
 
 
-type DenseF64Value
-    = Scalar Float
-    | Tensor (List DenseF64Value)
+
+-- Operations
 
 
-type alias DenseF64 =
-    { shape : List Dim
-    , values : DenseF64Value
-    }
-
-
-type MlirAttr
-    = StringAttr String
-    | BoolAttr Bool
-    | IntAttr Int
-    | FloatAttr Float
-    | TypeAttr MlirType
-    | ArrayAttr (List MlirAttr)
-    | DenseF64Attr { type_ : MlirType, payload : DenseF64 }
-    | SymbolRefAttr String
-    | VisibilityAttr Visibility
-    | UnitAttr
-
-
+{-| A MLIR operation or instruction.
+-}
 type alias MlirOp =
     { name : String
     , id : String
@@ -91,12 +142,21 @@ type alias MlirOp =
     }
 
 
-type alias MlirModule =
-    { body : List MlirOp
-    , loc : Loc
+
+-- Blocks, Regions and Modules
+
+
+{-| A basic block.
+-}
+type alias MlirBlock =
+    { args : List ( String, MlirType )
+    , body : List MlirOp
+    , terminator : MlirOp
     }
 
 
+{-| A region, which is a sequence of basic blocks with scoping.
+-}
 type MlirRegion
     = MlirRegion
         { entry : MlirBlock
@@ -104,10 +164,11 @@ type MlirRegion
         }
 
 
-type alias MlirBlock =
-    { args : List ( String, MlirType )
-    , body : List MlirOp
-    , terminator : MlirOp
+{-| A module which is a list of MLIR operations, often functions with regions.
+-}
+type alias MlirModule =
+    { body : List MlirOp
+    , loc : Loc
     }
 
 
@@ -120,6 +181,8 @@ unknownLoc =
     Loc.unknown
 
 
+{-| A set of builder functions for creation `MlirOp`s.
+-}
 type alias OpBuilderFns e =
     { withOperands : List String -> OpBuilder e -> OpBuilder e
     , withResults : List ( String, MlirType ) -> OpBuilder e -> OpBuilder e
@@ -132,10 +195,14 @@ type alias OpBuilderFns e =
     }
 
 
+{-| An opaque builder representing a MlirOp under construction.
+-}
 type OpBuilder e
     = OpBuilder e MlirOp
 
 
+{-| An implementation of the builder functions.
+-}
 opBuilder : OpBuilderFns e
 opBuilder =
     { withOperands =
@@ -164,9 +231,11 @@ opBuilder =
 
 
 {-| Creates a builder for a named MlirOp with a generated id that is unique within a given environment.
-The remaining parameters can be filled in using the builder functions in OpBuilderFn. This is designed for
-convenience of allowing an id generation function to be specified, and to pass through a new environment
-(with a particular id consumed).
+This is designed for convenience of allowing an id generation function to be specified, and to pass
+through a new environment (with a particular id consumed).
+
+The remaining parameters can be filled in using the builder functions in OpBuilderFn.
+
 -}
 mlirOp : (e -> ( e, String )) -> e -> String -> OpBuilder e
 mlirOp idFn env name =

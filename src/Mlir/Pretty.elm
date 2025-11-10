@@ -1,8 +1,17 @@
 module Mlir.Pretty exposing (ppModule)
 
+{-| Mlir.Pretty provides a pretty printer for the Mlir.Mlir model that will output MLIR in text format
+in the standard format.
+
+This implementation does not currently allow custom formats.
+
+@docs ppModule
+
+-}
+
 import Dict exposing (Dict)
 import FormatNumber as Fmt
-import Loc exposing (Loc)
+import Mlir.Loc as Loc exposing (Loc)
 import Mlir.Mlir
     exposing
         ( DenseF64Value(..)
@@ -87,6 +96,8 @@ collectSymbols modl =
 --==== Pretty Printer (generic MLIR form)
 
 
+{-| Pretty prints an MLIR module in the standard format.
+-}
 ppModule : MlirModule -> String
 ppModule m =
     let
