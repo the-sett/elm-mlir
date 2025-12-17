@@ -56,6 +56,7 @@ type MlirAttr
     = StringAttr String
     | BoolAttr Bool
     | IntAttr Int
+    | TypedIntAttr Int MlirType
     | FloatAttr Float
     | TypeAttr MlirType
     | ArrayAttr (List MlirAttr)

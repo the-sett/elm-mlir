@@ -421,6 +421,9 @@ ppAttr attr =
         IntAttr i ->
             String.fromInt i
 
+        TypedIntAttr i t ->
+              String.fromInt i ++ " : " ++ ppType t
+
         FloatAttr f ->
             String.fromFloat f
 
