@@ -425,7 +425,24 @@ ppAttr attr =
               String.fromInt i ++ " : " ++ ppType t
 
         FloatAttr f ->
-            String.fromFloat f
+            let
+                str =
+                    String.fromFloat f
+            in
+            if String.contains "." str then
+                str
+
+            else
+                Fmt.format
+                    { decimals = 1
+                    , thousandSeparator = ""
+                    , decimalSeparator = "."
+                    , negativePrefix = "-"
+                    , negativeSuffix = ""
+                    , positivePrefix = ""
+                    , positiveSuffix = ""
+                    }
+                    f
 
         TypeAttr t ->
             ppType t
