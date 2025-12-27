@@ -422,7 +422,29 @@ ppAttr attr =
             String.fromInt i
 
         TypedIntAttr i t ->
-              String.fromInt i ++ " : " ++ ppType t
+            String.fromInt i ++ " : " ++ ppType t
+
+        TypedFloatAttr f t ->
+            let
+                str =
+                    String.fromFloat f
+            in
+            if String.contains "." str then
+                str ++ " : " ++ ppType t
+
+            else
+                Fmt.format
+                    { decimals = 1
+                    , thousandSeparator = ""
+                    , decimalSeparator = "."
+                    , negativePrefix = "-"
+                    , negativeSuffix = ""
+                    , positivePrefix = ""
+                    , positiveSuffix = ""
+                    }
+                    f
+                    ++ " : "
+                    ++ ppType t
 
         FloatAttr f ->
             let
