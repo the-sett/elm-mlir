@@ -418,11 +418,13 @@ ppAttr attr =
             else
                 "false"
 
-        IntAttr i ->
-            String.fromInt i
+        IntAttr maybeType i ->
+            case maybeType of
+                Just t ->
+                    String.fromInt i ++ " : " ++ ppType t
 
-        TypedIntAttr i t ->
-            String.fromInt i ++ " : " ++ ppType t
+                Nothing ->
+                    String.fromInt i
 
         TypedFloatAttr f t ->
             let
@@ -469,8 +471,13 @@ ppAttr attr =
         TypeAttr t ->
             ppType t
 
-        ArrayAttr xs ->
-            "[" ++ (xs |> List.map ppAttr |> String.join ", ") ++ "]"
+        ArrayAttr maybeType xs ->
+            case maybeType of
+                Just t ->
+                    "array<" ++ ppType t ++ ": " ++ (xs |> List.map ppAttr |> String.join ", ") ++ ">"
+
+                Nothing ->
+                    "[" ++ (xs |> List.map ppAttr |> String.join ", ") ++ "]"
 
         DenseF64Attr rec ->
             String.concat
@@ -480,19 +487,6 @@ ppAttr attr =
                 , ppType rec.type_
                 ]
 
-        --DenseI64ArrayAttr xs ->
-        --    String.concat
-        --        [ "array<i64: "
-        --        , xs |> List.map String.fromInt |> String.join ", "
-        --        , ">"
-        --        ]
-        DenseI64ArrayAttr ints ->
-            -- textual form that MLIR parses as DenseI64ArrayAttr
-            "dense<["
-                ++ String.join ", " (List.map String.fromInt ints)
-                ++ "]> : tensor<"
-                ++ String.fromInt (List.length ints)
-                ++ "xi64>"
 
         SymbolRefAttr s ->
             "@" ++ s

@@ -55,14 +55,12 @@ import OrderedDict exposing (OrderedDict)
 type MlirAttr
     = StringAttr String
     | BoolAttr Bool
-    | IntAttr Int
-    | TypedIntAttr Int MlirType
+    | IntAttr (Maybe MlirType) Int
     | TypedFloatAttr Float MlirType
     | FloatAttr Float
     | TypeAttr MlirType
-    | ArrayAttr (List MlirAttr)
+    | ArrayAttr (Maybe MlirType) (List MlirAttr)
     | DenseF64Attr { type_ : MlirType, payload : DenseF64 }
-    | DenseI64ArrayAttr (List Int)
     | SymbolRefAttr String
     | VisibilityAttr Visibility
     | UnitAttr
