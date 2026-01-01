@@ -480,6 +480,20 @@ ppAttr attr =
                 , ppType rec.type_
                 ]
 
+        --DenseI64ArrayAttr xs ->
+        --    String.concat
+        --        [ "array<i64: "
+        --        , xs |> List.map String.fromInt |> String.join ", "
+        --        , ">"
+        --        ]
+        DenseI64ArrayAttr ints ->
+            -- textual form that MLIR parses as DenseI64ArrayAttr
+            "dense<["
+                ++ String.join ", " (List.map String.fromInt ints)
+                ++ "]> : tensor<"
+                ++ String.fromInt (List.length ints)
+                ++ "xi64>"
+
         SymbolRefAttr s ->
             "@" ++ s
 

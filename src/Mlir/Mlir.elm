@@ -62,6 +62,7 @@ type MlirAttr
     | TypeAttr MlirType
     | ArrayAttr (List MlirAttr)
     | DenseF64Attr { type_ : MlirType, payload : DenseF64 }
+    | DenseI64ArrayAttr (List Int)
     | SymbolRefAttr String
     | VisibilityAttr Visibility
     | UnitAttr
