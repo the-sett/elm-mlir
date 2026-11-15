@@ -1,23 +1,46 @@
 module Mlir.Mlir exposing
     ( MlirAttr(..)
-    , Dim(..), DenseF64, DenseF64Value(..), Visibility(..)
+    , Visibility(..)
     , MlirType(..)
     , MlirOp
     , MlirBlock, MlirRegion(..), MlirModule
     , OpBuilderFns, OpBuilder, opBuilder, mlirOp
     )
 
-{-| MLIR models the MLIR SSA compiler representation. This can be used to build MLIR code for further
-processing by the MLIR tool-chain and development system.
+{-| An MLIR program in memory: the form a program takes between being built in
+Elm and being written out as text (`Mlir.Pretty`) or as bytecode
+(`Mlir.Bytecode.StreamEncode`).
+
+MLIR is a compiler framework whose programs are built from _operations_. An
+operation has a name of the form `dialect.op`, where a _dialect_ is a named
+family of operations and types, such as `func`, `arith` or `llvm`. It reads values, its _operands_, and defines new ones, its _results_. It
+carries _attributes_, which are constant data such as a callee's name or an
+integer flag, and it may contain _regions_ of nested code. A region is a list
+of _blocks_, and a block is a straight run of operations that ends in a
+_terminator_, the operation that says where control goes next. Values are in
+SSA form: each is defined exactly once, by an operation's result or a block's
+argument, and is referred to everywhere else by its name.
+
+The model is generic. An operation is described by its name string and its
+fields, not by a type of its own, so nothing here knows which operations exist
+or checks that an operation's operands, results or attributes make sense for
+it. The names of values and of blocks are plain strings. The attributes and
+types are a fixed set rather than all that MLIR allows, with an opaque form,
+written as its text, for any other attribute or dialect type.
+
+Most of the module is that model. The rest is the _op builder_: `mlirOp` starts
+an operation and draws its `id` from an environment, the fields of `opBuilder`
+fill it in, and `build` returns the operation with the environment left after
+the `id` was drawn.
 
 
 # MLIR Model
 
 
-## Atributes
+## Attributes
 
 @docs MlirAttr
-@docs Dim, DenseF64, DenseF64Value, Visibility
+@docs Visibility
 
 
 ## Types
@@ -50,85 +73,117 @@ import OrderedDict exposing (OrderedDict)
 -- Attributes
 
 
-{-| Attributes are constant, known-value pieces of metadata attached to operations and functions.
+{-| A constant value attached to an operation under a name in its `attrs`.
+
+`StringAttr` holds text with its escape sequences, such as `\n`, still
+written out rather than decoded. `Mlir.Pretty` and `Mlir.Bytecode.StringTable`
+each convert them for their own output, and not in the same way. Nothing here
+checks that the text is in that form.
+
+`BoolAttr` holds `true` or `false`.
+
+`IntAttr` carries the type the integer is given, or `Nothing` for an integer
+written without one. `TypedFloatAttr` always carries its type.
+
+`TypeAttr` is a type used as a value.
+
+`ArrayAttr` is a list of attributes. With `Just t` it is a dense array of
+elements of type `t`, and its elements should then all be untyped `IntAttr`s
+(`IntAttr Nothing`). The bytecode encoder in `Mlir.Bytecode.AttrType` keeps
+the integer of each `IntAttr` element and drops any other element, and
+`Mlir.Pretty` prints a typed `IntAttr` element with its type. With `Nothing`
+it is an ordinary list whose elements may be of any kind, mixed.
+
+`SymbolRefAttr` refers to a named symbol, such as a function, by its name
+without MLIR's leading `@`.
+
+`VisibilityAttr` gives a symbol's visibility.
+
+`UnitAttr` carries no value; its presence under a name is the whole of what it
+says.
+
+`DictAttr` is a dictionary of named attributes used as a value, such as an
+empty `parameters = {}`. Its entries are kept, and written, in name order.
+
+`OpaqueAttr` is any other attribute, as its full assembly text, such as
+`#mosh<ape[2]> : !mosh.ape`. It is written as that text, which MLIR parses when
+it reads it. Its dialect is the name after the leading `#`, up to the first `.`
+or `<`; text that does not start with `#` belongs to the builtin dialect.
+
 -}
 type MlirAttr
     = StringAttr String
     | BoolAttr Bool
     | IntAttr (Maybe MlirType) Int
     | TypedFloatAttr Float MlirType
-    | FloatAttr Float
     | TypeAttr MlirType
     | ArrayAttr (Maybe MlirType) (List MlirAttr)
-    | DenseF64Attr { type_ : MlirType, payload : DenseF64 }
     | SymbolRefAttr String
     | VisibilityAttr Visibility
     | UnitAttr
+    | DictAttr (Dict String MlirAttr)
+    | OpaqueAttr String
 
 
-{-| Function visibility attribute values.
+{-| The visibility a `VisibilityAttr` can give a symbol. `Private` is the only
+one modelled.
 -}
 type Visibility
-    = Public
-    | Private
-    | Nested
-
-
-{-| Array dimensions.
--}
-type Dim
-    = Static Int
-    | Dynamic
-
-
-{-| Dense F64 values, such as tensors.
--}
-type alias DenseF64 =
-    { shape : List Dim
-    , values : DenseF64Value
-    }
-
-
-{-| Dense F64 values, such as tensors.
--}
-type DenseF64Value
-    = Scalar Float
-    | Tensor (List DenseF64Value)
+    = Private
 
 
 
 -- Types
 
 
-{-| MLIR uses an open type system, meaning there is no fixed, hardcoded list of all valid types.
-Instead, types are defined within specific dialects, which are modular extensions to the core MLIR
-framework.
+{-| The type of an SSA value, or of an attribute's contents.
 
-A hard-coded set of common types is provided here.
+MLIR has no fixed list of types: each dialect may define its own. This is a
+handful of builtin types, plus a way to name any dialect's type.
+
+`I1`, `I8`, `I32` and `I64` are signless integers of that many bits, and `F64`
+is a 64-bit float. `SignedIntegerType w` is the signed integer of `w` bits, such
+as `si64`, and `IndexType` is MLIR's `index`.
+
+`NamedStruct` names a type defined by a dialect, in full and without MLIR's
+leading `!`, such as `eco.value`. The part before the first `.` is the
+dialect. The type need not be a struct.
+
+`FunctionType` is the type of a function, from its input types to its result
+types.
 
 -}
 type MlirType
     = I1
     | I8
-    | I16
     | I32
     | I64
-    | F32
     | F64
-    | Index
-    | MemRef { dims : List Dim, elem : MlirType }
-    | StructType (List MlirType)
     | NamedStruct String
     | FunctionType { inputs : List MlirType, results : List MlirType }
-    | RankedTensor (List Dim) MlirType
-    | UnrankedTensor MlirType
+    | IndexType
+    | SignedIntegerType Int
 
 
 
 -- Operations
 
 
-{-| A MLIR operation or instruction.
+{-| One MLIR operation.
+
+`name` is the full `dialect.op` name. `id` is a name for the operation, which
+`mlirOp` takes from its `idFn`. Neither `Mlir.Pretty` nor the bytecode
+encoders read it.
+
+`operands` are the names of the SSA values the operation reads, and `results`
+the names and types of those it defines. `operands` holds names only; an
+operand's type is the one given where the value was defined.
+
+`isTerminator` marks an operation that ends a block. `successors` name, by
+their labels, the blocks a terminator may pass control to. `Mlir.Pretty`
+prints them as given, so for text output each must carry MLIR's leading `^`;
+the bytecode encoder accepts a label with or without it.
+
 -}
 type alias MlirOp =
     { name : String
@@ -147,7 +202,14 @@ type alias MlirOp =
 -- Blocks, Regions and Modules
 
 
-{-| A basic block.
+{-| A block: arguments, a run of operations, and the terminator that ends it.
+
+`args` are the SSA values the block defines on entry, as names and types.
+
+`terminator` is the operation that ends the block. `body` may also hold
+operations whose `isTerminator` is set; `Mlir.Pretty` and
+`Mlir.Bytecode.IrSection` skip those and write only `terminator` at the end.
+
 -}
 type alias MlirBlock =
     { args : List ( String, MlirType )
@@ -156,7 +218,14 @@ type alias MlirBlock =
     }
 
 
-{-| A region, which is a sequence of basic blocks with scoping.
+{-| A region of nested code inside an operation: an entry block, where control
+enters, followed by any further blocks.
+
+The further blocks are kept in `blocks` under their labels, in the order they
+were inserted, and those labels are what `successors` refer to. The entry block
+has no label here; `Mlir.Pretty` and `Mlir.Bytecode.IrSection` both call it
+`bb0`, so no block in `blocks` should be labelled `bb0`.
+
 -}
 type MlirRegion
     = MlirRegion
@@ -165,7 +234,8 @@ type MlirRegion
         }
 
 
-{-| A module which is a list of MLIR operations, often functions with regions.
+{-| A whole MLIR program: its top-level operations, such as function
+definitions, in order, and a location for the module itself.
 -}
 type alias MlirModule =
     { body : List MlirOp
@@ -177,12 +247,21 @@ type alias MlirModule =
 --=== Builders
 
 
+{-| The location of every operation started by `mlirOp`, `Mlir.Loc.unknown`.
+-}
 unknownLoc : Loc
 unknownLoc =
     Loc.unknown
 
 
-{-| A set of builder functions for creation `MlirOp`s.
+{-| The functions of the op builder, as a record so that they are reached
+through the one value `opBuilder`.
+
+Each `with...` field, and `isTerminator`, replaces the field of the operation
+it names; none adds to what is already there, so a second `withAttrs` discards
+the attributes the first one set. `build` finishes the operation and returns it
+with the environment carried in the builder.
+
 -}
 type alias OpBuilderFns e =
     { withOperands : List String -> OpBuilder e -> OpBuilder e
@@ -190,19 +269,22 @@ type alias OpBuilderFns e =
     , withAttrs : Dict String MlirAttr -> OpBuilder e -> OpBuilder e
     , withRegions : List MlirRegion -> OpBuilder e -> OpBuilder e
     , isTerminator : Bool -> OpBuilder e -> OpBuilder e
-    , withLoc : Loc -> OpBuilder e -> OpBuilder e
-    , withSuccessors : List String -> OpBuilder e -> OpBuilder e
     , build : OpBuilder e -> ( e, MlirOp )
     }
 
 
-{-| An opaque builder representing a MlirOp under construction.
+{-| An operation under construction, together with the environment that was
+left after its `id` was drawn.
+
+The only way to get one is `mlirOp`. The fields of `opBuilder` fill in the
+operation, and `build` gives back the operation and the environment.
+
 -}
 type OpBuilder e
     = OpBuilder e MlirOp
 
 
-{-| An implementation of the builder functions.
+{-| The op builder's functions, as `OpBuilderFns` describes them.
 -}
 opBuilder : OpBuilderFns e
 opBuilder =
@@ -221,21 +303,16 @@ opBuilder =
     , isTerminator =
         \flag (OpBuilder e op) ->
             OpBuilder e { op | isTerminator = flag }
-    , withLoc =
-        \loc (OpBuilder e op) ->
-            OpBuilder e { op | loc = loc }
-    , withSuccessors =
-        \succs (OpBuilder e op) ->
-            OpBuilder e { op | successors = succs }
     , build = \(OpBuilder e op) -> ( e, op )
     }
 
 
-{-| Creates a builder for a named MlirOp with a generated id that is unique within a given environment.
-This is designed for convenience of allowing an id generation function to be specified, and to pass
-through a new environment (with a particular id consumed).
+{-| Starts building an operation called `name`, taking its `id` and the next
+environment from `idFn env`.
 
-The remaining parameters can be filled in using the builder functions in OpBuilderFn.
+The operation starts with no operands, results, attributes, regions or
+successors, is not a terminator, and has the unknown location. Whether the `id`
+is unique depends only on `idFn`.
 
 -}
 mlirOp : (e -> ( e, String )) -> e -> String -> OpBuilder e

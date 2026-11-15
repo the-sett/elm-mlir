@@ -1,14 +1,29 @@
-module Mlir.Loc exposing (Loc(..), Pos, combine, unknown)
+module Mlir.Loc exposing (Loc(..), Pos, unknown)
 
-{-| Source code locations with file name and start and end positions defined as column and row
-within the file.
+{-| Every MLIR operation and module the compiler builds has a location field,
+which either names a place in the source or says that the place is unknown.
+This module is the type of that field.
 
-@docs Loc, Pos, combine, unknown
+A location names a file and spans a range within it, from a start position to
+an end position, each a row and a column. Nothing here says whether rows and
+columns count from zero or from one.
+
+`unknown` is the location to use when no source position is available. Its
+file name is the string `"unknown"` and both positions are 0:0. It is an
+ordinary value, not a separate constructor. `Mlir.Bytecode.AttrType` treats any
+location named `"unknown"` that starts at 0:0 as MLIR's unknown location.
+
+@docs Loc, Pos, unknown
 
 -}
 
 
-{-| A source code location within a named file with start and end positions defined as column and row.
+{-| A place in the source: a range in a named file from `start` to `end`, or
+the placeholder `unknown`.
+
+The constructor is exposed, so any name and any positions can be given; nothing
+checks that the file exists or that `start` comes before `end`.
+
 -}
 type Loc
     = Loc
@@ -18,7 +33,7 @@ type Loc
         }
 
 
-{-| A column and row position.
+{-| A position in a source file, as a row and a column.
 -}
 type alias Pos =
     { row : Int
@@ -26,7 +41,7 @@ type alias Pos =
     }
 
 
-{-| The default unknown location, which is file "unknown" at (0, 0) to (0, 0)
+{-| The location given to an operation or module that has no source position.
 -}
 unknown : Loc
 unknown =
@@ -35,38 +50,3 @@ unknown =
     , end = { row = 0, col = 0 }
     }
         |> Loc
-
-
-{-| Combines two locations into one larger location that runs from the earliest start point to latest
-end point of the two locations.
-
-It is assumed that the two locations refer to the same named file, the actual file name returned will be
-`a.name`.
-
--}
-combine : Loc -> Loc -> Loc
-combine (Loc a) (Loc b) =
-    let
-        before p1 p2 =
-            (p1.row < p2.row)
-                || (p1.row == p2.row && p1.col < p2.col)
-
-        start =
-            if before a.start b.start then
-                a.start
-
-            else
-                b.start
-
-        end =
-            if before a.end b.end then
-                b.end
-
-            else
-                a.end
-    in
-    Loc
-        { name = a.name
-        , start = start
-        , end = end
-        }
