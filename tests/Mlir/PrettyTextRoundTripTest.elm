@@ -201,7 +201,7 @@ whose body contains no character `isRawForbidden` rejects and decodes, by
 -}
 expectStringRoundTrip : String -> String -> Expectation
 expectStringRoundTrip stored expected =
-    case printedValue (StringAttr stored) (NamedStruct "eco.value") of
+    case printedValue (StringAttr stored) (NamedStruct "test.value") of
         Just lit ->
             if not (String.startsWith "\"" lit && String.endsWith "\"" lit && String.length lit >= 2) then
                 Expect.fail ("not a quoted literal: " ++ lit)

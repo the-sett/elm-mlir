@@ -5,26 +5,31 @@ module Mlir.Bytecode.DialectSection exposing
 
 {-| MLIR bytecode does not write an operation's name with the operation. It
 refers to the name by an index into a list of operation names kept in the
-dialect section, and this module numbers those names and writes that section.
+dialect section, and this module holds that numbering and writes that section.
 
 An MLIR operation name has the form `dialect.op`, such as `func.func`. The
-_dialect_ is the text before the first `.` and the _suffix_ is the rest; a name
-with no `.` is taken as a dialect with an empty suffix. The dialect section
-lists the dialects, then the operation names in _op groups_. An op group is one
-dialect, given by its index in the dialect list, followed by suffixes of that
-dialect's operation names. An operation name is numbered by its position in the
-sequence of op groups, counting from 0 and continuing across groups. A
-`DialectRegistry` holds both numberings and the groups.
+_dialect_ is the text before the first `.` and the _suffix_ is the rest. The
+dialect section lists the dialects, then the operation names in _op groups_.
+An op group is one dialect, given by its index in the dialect list, followed
+by suffixes of that dialect's operation names. The section holds no index for
+an operation name: its index is the position of its suffix among the suffixes
+listed in all the op groups, counting from 0 and continuing across groups. A
+dialect's index is likewise its position in the dialect list.
+
+A `DialectRegistry` holds two things apart: the numbering that `opIndex` and
+`dialectIndex` answer from, and the dialect list and op groups that `encode`
+writes. This module works out no numbering of its own. `buildRegistry` and
+`registryFromOpMap` take what they are given, and nothing checks that the two
+parts agree.
 
 Dialect names and suffixes are written as indices into the string section, so
 each must already be in the `StringTable` given to `encode`. No lookup in this
-module is checked: a name that was never added gets the index -1, which
-`Mlir.Bytecode.VarInt.encodeVarInt` writes like any other number, so a missed
-name makes a corrupt file rather than an error.
-
-`buildRegistry` and `registryFromOpMap` make a registry from numberings worked
-out elsewhere (`Mlir.Bytecode.StreamEncode` numbers operation names as it
-meets them).
+module is checked. `Mlir.Bytecode.StringTable.indexOf` gives -1 for a string
+that was never added, and `Mlir.Bytecode.VarInt.encodeVarInt` writes a negative
+number in nine bytes rather than rejecting it, so a missed suffix is written as
+2^64 − 1 and a missed dialect name, whose index is doubled first, as 2^64 − 2.
+`opIndex` and `dialectIndex` likewise return -1 for a name the registry has no
+index for, and report no miss as an error.
 
 @docs DialectRegistry, opIndex, dialectIndex, encode
 @docs OpGroup, buildRegistry, registryFromOpMap
@@ -37,12 +42,14 @@ import Mlir.Bytecode.StringTable as StringTable exposing (StringTable)
 import Mlir.Bytecode.VarInt exposing (encodeVarInt)
 
 
-{-| A numbering of dialects and operation names, together with the op groups
-the dialect section lists them in.
+{-| A numbering of dialects and operation names, together with a dialect list
+and op groups.
 
-`opIndex` and `dialectIndex` look the numbers up, and `encode` writes the
-section. One from `buildRegistry` holds exactly what it was given, unchecked.
-One from `registryFromOpMap` answers only `opIndex`.
+`opIndex` and `dialectIndex` answer from the numbering, and `encode` writes
+the dialect list and op groups. The two are held apart, so an index looked up
+names the right entry of the written section only where they agree. A
+registry is made by `buildRegistry`, which holds exactly what it is given, or
+by `registryFromOpMap`, which answers only `opIndex`.
 
 -}
 type DialectRegistry
@@ -54,8 +61,9 @@ type DialectRegistry
         }
 
 
-{-| One op group of the dialect section: a dialect, given by its index, and
-suffixes of that dialect's operation names, in the order they are written.
+{-| One op group of the dialect section: a dialect, given by its index in the
+dialect list, and suffixes of that dialect's operation names, in the order they
+are written.
 
 `opNames` holds suffixes, not full names: `func` for `func.func`. `encode`
 writes whatever groups a registry holds, and one from `buildRegistry` may hold
@@ -68,8 +76,8 @@ type alias OpGroup =
     }
 
 
-{-| Returns the index of the operation named `name`, written in full as
-`dialect.op`, or -1 if the registry has no index for it.
+{-| Returns the registry's index for the operation name `name`, written in
+full as `dialect.op`, or -1 if the registry has no index for it.
 -}
 opIndex : String -> DialectRegistry -> Int
 opIndex name (DialectRegistry reg) =
@@ -81,8 +89,8 @@ opIndex name (DialectRegistry reg) =
             -1
 
 
-{-| Returns the index of the dialect `name` in the dialect list, or -1 if the
-registry has no index for it.
+{-| Returns the registry's index for the dialect `name`, or -1 if the registry
+has no index for it.
 -}
 dialectIndex : String -> DialectRegistry -> Int
 dialectIndex name (DialectRegistry reg) =
@@ -97,10 +105,16 @@ dialectIndex name (DialectRegistry reg) =
 {-| Creates an encoder for the contents of the dialect section, with every name
 written as its index in `stringTable`.
 
-It writes the number of dialects; each dialect name's string index times two,
-the low bit being a flag for a dialect version that is never set; the total
-number of operation names across all groups; and then each op group in turn.
-Every number is a PrefixVarInt, as `Mlir.Bytecode.VarInt` describes.
+It writes the number of dialects; for each dialect, its name's string index
+times two, so that the low bit, which would say a dialect version follows, is
+clear; the number of operation names, summed over all the op groups; and then
+each op group as its dialect index, its number of suffixes, and each suffix's
+string index, not doubled. Every number is a PrefixVarInt, as
+`Mlir.Bytecode.VarInt` describes. This is the layout MLIR reads for bytecode
+version 4, the version `Mlir.Bytecode.StreamEncode` writes in the file header.
+
+A dialect name missing from `stringTable` is written as 2^64 − 2, and a
+missing suffix as 2^64 − 1.
 
 -}
 encode : StringTable -> DialectRegistry -> BE.Encoder
@@ -136,7 +150,8 @@ encode stringTable (DialectRegistry reg) =
 
 
 {-| Creates an encoder for one op group: its dialect index, its number of
-suffixes, and each suffix's index in `stringTable`.
+suffixes, and each suffix's index in `stringTable`, written as it is with no
+flag bit, unlike a dialect name's index in `encode`.
 -}
 encodeOpGroup : StringTable -> OpGroup -> BE.Encoder
 encodeOpGroup stringTable group =
@@ -152,7 +167,6 @@ encodeOpGroup stringTable group =
                             strIdx =
                                 StringTable.indexOf name stringTable
                         in
-                        -- Op name is a plain string table index
                         encodeVarInt strIdx
                     )
     in
@@ -163,12 +177,16 @@ encodeOpGroup stringTable group =
         )
 
 
-{-| Creates a registry holding exactly the given numberings and op groups.
+{-| Creates a registry holding exactly the given numberings, dialect list and op
+groups.
 
 Nothing is checked. `opIndexMap`, keyed by full operation name, and
 `dialectIndices` are what `opIndex` and `dialectIndex` return, and `dialects`
-and `opGroups` are what `encode` writes, whether or not they agree with each
-other.
+and `opGroups` are what `encode` writes. For a looked-up index to name the
+right entry of the written section, each operation name's index must be the
+position of its suffix, counting from 0 through `opGroups` in order, in a group
+whose `dialectIdx` is the index of the operation's dialect, and each dialect's
+index its position in `dialects`.
 
 -}
 buildRegistry :

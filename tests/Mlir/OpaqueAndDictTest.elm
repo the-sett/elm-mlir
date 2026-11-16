@@ -69,7 +69,7 @@ withRegion name attrs =
 
 bytecode : List String -> List MlirOp -> Bytes
 bytecode isolated ops =
-    StreamEncode.assembleModule
+    StreamEncode.assembleModule "elm-mlir-tests"
         (StreamEncode.emptyStreamTables
             |> StreamEncode.isolating isolated
             |> StreamEncode.collectAndEncodeOps ops
@@ -136,10 +136,10 @@ suite =
                 Pretty.ppTopLevelOp
                     (withRegion "test.op"
                         [ ( "d", DictAttr (Dict.fromList [ ( "z", UnitAttr ), ( "a", IntAttr (Just (SignedIntegerType 64)) -7 ) ]) )
-                        , ( "o", OpaqueAttr "#mosh<ape[2]> : !mosh.ape" )
+                        , ( "o", OpaqueAttr "#test<shape[2]> : !test.shape" )
                         ]
                     )
-                    |> String.contains "{d = {a = -7 : si64, z}, o = #mosh<ape[2]> : !mosh.ape}"
+                    |> String.contains "{d = {a = -7 : si64, z}, o = #test<shape[2]> : !test.shape}"
                     |> Expect.equal True
         , test "an index argument prints as index" <|
             \_ ->

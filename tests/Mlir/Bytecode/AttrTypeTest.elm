@@ -29,7 +29,7 @@ import Test exposing (Test)
 
 probeOp : Loc -> Dict String MlirAttr -> MlirOp
 probeOp loc attrs =
-    { name = "eco.probe"
+    { name = "test.probe"
     , id = "op_0"
     , operands = []
     , results = []

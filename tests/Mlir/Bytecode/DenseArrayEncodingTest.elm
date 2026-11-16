@@ -2,14 +2,14 @@ module Mlir.Bytecode.DenseArrayEncodingTest exposing (suite)
 
 {-| Without these tests, a dense array could be written with the wrong
 element width and the data section would still encode without error; the
-mismatch would only show when the back end read the bytecode.
+mismatch would only show when MLIR read the bytecode.
 
 A dense array here is an `ArrayAttr (Just t) …`, written as MLIR's
 `DenseArrayAttr`: code 17, the index of the element type `t`, the element
 count, the length of the blob, and the blob, which holds each element in the
 width of `t`. `Mlir.Bytecode.AttrType` owns that layout.
 
-The fixture is one op, `eco.probe`, whose only attribute is the dense array.
+The fixture is one op, `test.probe`, whose only attribute is the dense array.
 Each test collects that op into a fresh table, encodes the attribute data
 section, and looks for the array's whole entry anywhere in it, after checking
 that the element type was given an index.
@@ -57,7 +57,7 @@ holding `vals`.
 -}
 denseOp : MlirType -> List Int -> MlirOp
 denseOp ty vals =
-    { name = "eco.probe"
+    { name = "test.probe"
     , id = "op_0"
     , operands = []
     , results = []

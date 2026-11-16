@@ -1,47 +1,76 @@
 module Mlir.Pretty exposing (ppModuleHeader, ppModuleFooter, ppTopLevelOp)
 
-{-| The compiler can write its MLIR program out as text, and this module turns
-the in-memory model of `Mlir.Mlir` into that text.
+{-| This module writes an MLIR program built with `Mlir.Mlir` as MLIR text, for
+a person to read and for MLIR's tools to read back. It writes the operations in
+a form that any dialect's operations can take, so it needs no syntax of any
+dialect's own.
 
 MLIR has two textual forms for an operation. A dialect may define a _custom
 form_ for its own operations, with whatever syntax it likes. Every operation
 also has the _generic form_, which spells out each part in the same order
 whatever the operation:
 
-    results = "dialect.op"(operands)[successors] (regions) {attributes} : (operand types) -> result type
+    results = "dialect.op"(operands)[successors] <{properties}> (regions) {attributes} : (operand types) -> result types
 
-This module prints only the generic form, so it needs no syntax of any
-dialect's own, except that an operation with a `callee` attribute has its
-attributes printed as `<{...}>` properties, before its regions, rather than as
-a `{...}` dictionary after them.
+The attributes are an _attribute dictionary_ after the regions; _properties_
+are attributes written apart from it, before the regions.
 
-One part of the generic form is not held by the operation it describes: an
-`MlirOp` names its operands but does not give their types. When the operation
-has an `_operand_types` attribute, a list of `TypeAttr`s, those types are
-printed. Otherwise each operand is looked up among the values in scope: the
-arguments of its block and of every enclosing block, and the results of the
-operations printed before it in each of those blocks (a top-level operation
-starts from nothing). The lookup
-does not reach into another block of the same region, and an operand it does
-not find is left out, so the printed operand types can be fewer than the
-operands. The `_operand_types` attribute is itself printed with the other
-attributes.
+Every operation is printed in the generic form. The one exception is the
+module that holds the operations, which is printed in `builtin.module`'s custom
+form, `module {` ... `}`.
 
-Locations are accepted but not printed: the location of every operation and of
-the module prints as nothing.
+An attribute named `callee` decides whether an operation's attributes are
+printed as properties or as the dictionary. An operation with such an
+attribute, whatever the operation, has all of its attributes, `_operand_types`
+included, printed as `<{...}>` properties before its regions; any other
+operation has them printed as a `{...}` dictionary after them.
 
 A module is printed piece by piece: `ppModuleHeader`, then `ppTopLevelOp` for
-each top-level operation, then `ppModuleFooter`.
+each top-level operation, then `ppModuleFooter`, the strings concatenated in
+that order.
+
+One part of the generic form is not held by the operation it describes: an
+`MlirOp` names its operands but does not give their types. They come from one
+of two places. When the operation has an attribute named `_operand_types` that
+is an `ArrayAttr`, its `TypeAttr` elements are the operand types, in order, and
+any other element is skipped. That attribute is a convention of this package,
+not of MLIR, and it is also printed with the other attributes. Otherwise each
+operand is looked up by name among the values in scope: the arguments of the
+operation's block, the results of the operations printed before it in that
+block, and, inside a region, whatever was in scope at the operation that holds
+the region. An operand not found is left out without warning, so the signature
+lists fewer types than there are operands and is not valid MLIR. Nothing is
+found for an operand of a top-level operation, which has nothing in scope; for
+an operand in a labelled block, or in a region nested inside one, whose value
+is defined in the entry block or in another labelled block; or for an operand
+whose value is defined after the operation. `_operand_types` is the way to give
+the types in those cases.
+
+Names are printed as they are given. A value name needs MLIR's leading `%`, as
+in `%0`, and a successor its leading `^`, as in `^bb1`. A block label, which
+`Mlir.Mlir` holds without its `^`, is given one. The entry block of a region is
+labelled `bb0`, and its header, `^bb0(arguments):`, is left out when it has no
+arguments. A labelled block called `bb0` with no arguments loses its header in
+the same way, so its operations run on from the block before it.
+
+Locations are not printed, for the module or for any operation.
 
 A `StringAttr` holds its text with escape sequences written out, as
-`Mlir.Mlir` describes, and is rewritten on the way out: a `\uXXXX` escape
-becomes the character it names (a control character or a backslash as a
-two-hex-digit escape), `\n`, `\t`, `\"` and `\\` are kept, and so is a `\u` not
-followed by four hexadecimal digits. `\r` becomes `\0D`, any other escape
-loses its backslash, and a `"` that no backslash escapes gains one.
+`Mlir.Mlir` describes, and the text is rewritten for an MLIR string literal. A
+`\uXXXX` escape becomes the character it names, except that a control
+character (below U+0020, or U+007F) or a backslash becomes MLIR's
+two-hex-digit escape, so `\u000A` prints as `\0A`. The escapes `\n`, `\t`, `\"`
+and `\\` are kept, and so are a `\u` not followed by four hexadecimal digits
+and a backslash at the very end. `\r` becomes `\0D`. Any other escape loses its
+backslash: `\'` prints as `'`, and `\0A` in the text prints as `0A`. Last, a
+`"` that no backslash escapes gains one. Any other character outside an
+escape, a control character included, is printed as it is. A kept `\u`, a
+backslash at the very end and a raw newline, vertical tab or form feed give
+text that MLIR does not accept. The text of a `SymbolRefAttr`, a `NamedStruct`
+or an `OpaqueAttr` is printed as it is, with no escaping.
 
-The file also holds a walk that collects, under its `sym_name`, every operation
-that has one. Nothing uses it.
+`Mlir.Mlir` describes, type by type, the main differences between how this
+module and the bytecode writer, `Mlir.Bytecode.StreamEncode`, read the model.
 
 @docs ppModuleHeader, ppModuleFooter, ppTopLevelOp
 
@@ -61,12 +90,12 @@ import OrderedDict
 
 
 
---==== Environments (symbols, SSA)
+--==== Values in scope
 
 
-{-| The types of the values the printer knows at a point in a block, by value
-name: the arguments of the block and the results of the operations printed
-before that point.
+{-| The types of the values in scope at a point in a block, by value name: the
+block's arguments, the results of the operations printed before that point, and
+whatever was in scope at the operation that holds the block's region.
 
 This is a name for a `Dict`, not a new type.
 
@@ -76,18 +105,20 @@ type alias SsaEnv =
 
 
 
---==== Pretty Printer (generic MLIR form)
+--==== The module and its operations
 
 
-{-| The line that opens a printed module.
+{-| The line that opens a printed module, in `builtin.module`'s custom form,
+with no name and no attributes.
 -}
 ppModuleHeader : String
 ppModuleHeader =
     "module {\n"
 
 
-{-| The line that closes a printed module. Locations are not printed, so it
-carries none.
+{-| The line that closes a printed module. A space follows the closing brace,
+where the module's location would go, but locations are not printed, so the
+newline comes straight after it.
 -}
 ppModuleFooter : String
 ppModuleFooter =
@@ -98,11 +129,13 @@ ppModuleFooter =
 
 
 {-| Returns the text of one top-level operation of a module, with any regions
-nested in it, indented by two spaces and ending in a newline.
+nested in it, indented by two spaces and ending in a newline. Each operation's
+line ends in a space before its newline, where its location would go.
 
-Each top-level operation is printed with no known operand types, so its
-operand types are printed only when it has an `_operand_types` attribute that
-is an array. Otherwise its operand type list is empty.
+A top-level operation has nothing in scope, so its operand types are printed
+only when it has an `_operand_types` attribute that is an `ArrayAttr`;
+otherwise its operand type list is empty, `()`. The operations in its regions
+find their operand types as described above. Its `isTerminator` is not read.
 
 -}
 ppTopLevelOp : MlirOp -> String
@@ -117,7 +150,8 @@ one level deeper.
 The entry block is given the label `bb0`, whose header is left out when the
 block has no arguments. Each block's operand types are looked up starting from
 `outerEnv`, the values in scope at the operation that holds the region, plus
-the block's own arguments.
+the block's own arguments, so a labelled block does not see the values of the
+entry block or of another labelled block.
 
 -}
 ppRegion : Int -> SsaEnv -> MlirRegion -> String
@@ -142,12 +176,12 @@ ppRegion indent outerEnv (MlirRegion r) =
 at `indent`, then the operations of its body, then its terminator, each one
 level deeper.
 
-The header is left out for a block labelled `bb0` with no arguments, which is
-how an entry block without arguments is printed. Body operations marked
-`isTerminator` are skipped, because the terminator is printed from the block's
-`terminator` field. `env0` holds the types of the values known at the start of
-the block, by name; the results of each operation are added to it for the
-operations after it, terminator included.
+The header is left out for a block labelled `bb0` with no arguments: an entry
+block without arguments, and also a labelled block called `bb0`. Body
+operations marked `isTerminator` are skipped, because the terminator is printed
+from the block's `terminator` field. `env0` holds the types of the values known
+at the start of the block, by name; the results of each body operation not
+skipped are added to it for the operations after it, the terminator included.
 
 -}
 ppBlockWithLabel : Int -> String -> SsaEnv -> MlirBlock -> String
@@ -208,18 +242,17 @@ The result names and the `=` after them are left out when there are no
 results, and the successors, regions and attributes are each left out when
 there are none. Successors are printed as given, inside brackets. An operation
 with a `callee` attribute prints its attributes as `<{...}>` properties before
-its regions; any other prints them as a `{...}` dictionary after them. Each region
-is wrapped in braces, its block headers two levels deeper than the operation
-and their operations three, and its closing brace at the operation's own
-indent, and the regions are joined by commas inside parentheses.
+its regions; any other prints them as a `{...}` dictionary after them. Each
+region is wrapped in braces, its block headers two levels deeper than the
+operation and their operations three, and its closing brace at the operation's
+own indent, and the regions are joined by commas inside parentheses.
 
-The operand types come from the `_operand_types` attribute when there is one
-and it is an array, keeping only its `TypeAttr` elements, and otherwise from
-looking each operand up in `env`, leaving out any not found. `env` also
-becomes the outer scope of the operation's regions. A single result
-type is printed bare; no result, or several, are printed as a parenthesised
-list. The location prints as nothing, so the line ends in a space before the
-newline.
+The operand types come from the `_operand_types` attribute when it is an
+`ArrayAttr`, keeping only its `TypeAttr` elements, and otherwise from looking
+each operand up in `env`, leaving out any not found. `env` also becomes the
+outer scope of the operation's regions. A single result type is printed bare;
+no result, or several, are printed as a parenthesised list. The location
+prints as nothing, so the line ends in a space before the newline.
 
 -}
 ppOp : Int -> SsaEnv -> MlirOp -> String
@@ -266,7 +299,6 @@ ppOp indent env op =
         attrsStr =
             ppAttrs op.attrs
 
-        -- `<{...}>` properties precede the regions; a `{...}` dictionary follows them.
         ( propsStr, plainAttrsStr ) =
             if Dict.member "callee" op.attrs then
                 ( attrsStr, "" )
@@ -400,8 +432,7 @@ indentPad n =
             String.repeat (2 * n) " "
 
 
-{-| Returns the text of a location, which is always empty: locations are not
-printed.
+{-| The text printed for a location: nothing, since locations are not printed.
 -}
 ppLoc : String
 ppLoc =
@@ -453,10 +484,10 @@ ppAttrs attrs =
 `StringAttr`, which holds its escape sequences written out.
 
 A `\uXXXX` escape becomes the character it names. The escapes `\n`, `\t`, `\"`
-and `\\` are kept, and so is a `\u` not followed by four hexadecimal digits.
-`\r` becomes `\0D`, MLIR's hexadecimal escape for a carriage return. Any other
-escape loses its backslash, so `\'` becomes `'`. Last, a `"` that no backslash escapes, as the text of a
-multi-line string can hold, gains one.
+and `\\` are kept, and so are a `\u` not followed by four hexadecimal digits
+and a backslash at the very end. `\r` becomes `\0D`, MLIR's hexadecimal escape
+for a carriage return. Any other escape loses its backslash, so `\'` becomes
+`'`. Last, a `"` that no backslash escapes gains one.
 
 A character that a `\uXXXX` escape names is written as itself, except a
 control character or a backslash, which becomes a two-hex-digit escape (see
@@ -562,8 +593,8 @@ convertUnicodeEscapesToUtf8 s =
 {-| Returns the characters that spell code point `cp`, named by a `\uXXXX`
 escape, inside an MLIR string literal: the character itself, except that a
 control character (below U+0020, or U+007F) and a backslash become MLIR's
-two-hex-digit escape (`\0A`, `\5C`), which its lexer requires. A `"` is left
-for `escapeUnescapedQuotes`.
+two-hex-digit escape (`\0A`, `\5C`); a bare backslash would start an escape. A
+`"` is left for `escapeUnescapedQuotes`.
 -}
 escapeCodePoint : Int -> List Char
 escapeCodePoint cp =
@@ -621,15 +652,14 @@ parseHex s =
         s
 
 
-{-| Returns the MLIR literal for an `f64` value, one that reads back as
-exactly `f`.
+{-| Returns the MLIR literal for `f` as an `f64` value.
 
-A finite value is `String.fromFloat`'s text, the shortest decimal that reads
-back as `f`, with `.0` put in when that text has no `.` (MLIR lexes a decimal
-float only when it has one): `3` becomes `3.0` and `1e-7` becomes `1.0e-7`.
-Negative zero prints as `-0.0`. NaN and the infinities, which have no decimal
-spelling, print as MLIR's hexadecimal bit patterns: the canonical quiet NaN
-`0x7FF8000000000000`, `0x7FF0000000000000` and `0xFFF0000000000000`.
+A finite value is `String.fromFloat`'s text, with `.0` put in when that text
+has no `.` (MLIR reads a number without one as an integer): `3` becomes `3.0`
+and `1e-7` becomes `1.0e-7`. Negative zero prints as `-0.0`. NaN and the
+infinities, which have no decimal spelling, print as hexadecimal `f64` bit
+patterns: every NaN as the quiet NaN `0x7FF8000000000000`, and the infinities
+as `0x7FF0000000000000` and `0xFFF0000000000000`.
 
 -}
 ppFloatLiteral : Float -> String
@@ -668,11 +698,12 @@ ppFloatLiteral f =
 
 A `StringAttr` is quoted, its text rewritten by `escapeForMlir`. An `IntAttr`
 is followed by `: type` when it has a type, and a `TypedFloatAttr` always is;
-`ppFloatLiteral` spells its value. An
-`ArrayAttr (Just t)` prints as `array<t: ...>` (`array<t>` when empty) and an `ArrayAttr Nothing` as
-`[...]`, with each element spelled by this function. A `SymbolRefAttr` gets
-MLIR's leading `@`, a `UnitAttr` prints as `unit`, and a `VisibilityAttr`
-of `Private` prints as the quoted string `"private"`. A `DictAttr` prints as
+`ppFloatLiteral` spells its value. An `ArrayAttr (Just t)` prints as
+`array<t: ...>` (`array<t>` when empty) and an `ArrayAttr Nothing` as `[...]`,
+with each element spelled by this function, so a typed `IntAttr` element keeps
+its `: type`. A `SymbolRefAttr` gets MLIR's leading `@` and is otherwise printed
+as it is, unquoted. A `UnitAttr` prints as `unit`, and a `VisibilityAttr` of
+`Private` as the quoted string `"private"`. A `DictAttr` prints as
 `{key = value, ...}` in key order, a `UnitAttr` entry as its key alone, and an
 `OpaqueAttr` as its text.
 

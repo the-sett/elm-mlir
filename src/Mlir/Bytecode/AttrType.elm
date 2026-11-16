@@ -4,10 +4,9 @@ module Mlir.Bytecode.AttrType exposing
     , entryDialects
     )
 
-{-| MLIR bytecode writes each distinct attribute and type once, in a section of
-its own, and everywhere else refers to it by its index there. This module
-numbers the attributes and types an MLIR program uses, and writes that section
-and the offset section that goes with it.
+{-| An MLIR bytecode file holds attributes and types in a section of their own,
+and everywhere else refers to one by its index there. This module numbers the
+attributes and types an MLIR program uses, and writes that section.
 
 An _attribute_ is a constant value an operation carries, such as an integer or
 a string (`Mlir.Mlir.MlirAttr`). MLIR also treats a source location as an
@@ -15,43 +14,59 @@ attribute, and an operation's whole attribute dictionary as one attribute, so
 locations and dictionaries are numbered in the attribute list too. Types are
 numbered in a list of their own. Each list counts from 0.
 
-Entries refer to one another by index. A function type refers to its input and
-result types, an integer attribute to its type, and a dictionary to the string
-attributes that hold its names and to its values. So no entry is encoded while
-the table is built. Collection first gives an index to the entries an
-operation refers to, and `encodeDataAndOffsets` encodes the entries
-afterwards, looking up the indices they need in the finished table. A file
-location also refers to the string attribute holding its name, which
-collection does not add, so that reference is written as -1 unless the same
-text was collected as a string attribute for another reason.
+The entries of the two lists refer to one another by index. A function type
+refers to its input and result types, an integer attribute to its type, and a
+dictionary to the string attributes that hold its names and to its values. So
+no entry is encoded while the table, the two lists together, is built.
+Collection first gives an index to the entries an operation refers to, and
+`encodeDataAndOffsets` encodes the entries afterwards, looking up the indices
+they need in the finished table. A file location also refers to the string
+attribute holding its name, which collection does not add, so that reference
+is written as -1 unless the same text was collected as a string attribute for
+another reason.
 
 Collection tells values apart by an _entry key_, a string made from the value,
 and a value whose key is already in the table is not added again. Some
 different values share a key because they are encoded the same way: a
 `BoolAttr` and the `i1` integer of the same value, an untyped `IntAttr` and
 the `i64` one, and `VisibilityAttr Private` and the string attribute
-`"private"`. A location named `"unknown"` that starts at 0:0 is MLIR's unknown
-location, whatever its end. Any other location becomes a file, line and column
-location made from its name and its start; its end is not kept.
+`"private"`. Two float attributes of one type, one 0 and the other -0, also
+share a key, though they are not encoded the same way, so whichever is
+collected first is written for both; so do two dictionaries that differ only
+there.
+
+A location named `"unknown"` that starts at 0:0 is MLIR's unknown location,
+whatever its end. Any other location becomes a file, line and column location
+made from its name and its start, whose row and column are not converted (see
+`Mlir.Loc.Pos`); its end is not kept, so locations that differ only in their
+end share an entry.
 
 A lookup (`typeIndex`, `locIndex`, `dictAttrIndex`) works out the key again,
-and is not checked. A value that was never collected gets -1, which
-`Mlir.Bytecode.VarInt.encodeVarInt` writes like any other number, so a missed
-value makes a corrupt file rather than an error.
+and is not checked. A value that was never collected gets -1, which, wherever
+it is written as an index, points at no entry:
+`Mlir.Bytecode.VarInt.encodeVarInt` writes it in nine bytes as 2^64 − 1. A
+value that shares its key with a collected one gets that one's index.
 
 A table is built through a `StreamAccum`, which takes one operation at a time
 and whose indices never change once given, so an operation can be encoded as
-soon as it has been collected.
+soon as it has been collected. An operation's attribute dictionary is
+collected only when it is not empty, in the form `bytecodeAttrs` returns,
+without the package's own `_operand_types` attribute, and must be looked up in
+that form.
 
-In the data section, attributes and builtin types are written in the binary
-form of MLIR's builtin dialect. A `NamedStruct`, such as `!eco.value`, and an
-`OpaqueAttr` are written instead as their assembly text, the way they are spelt
-in an MLIR text file, under the dialect their text names. The offset section gives the
-length of each entry and the dialect it belongs to, in _dialect groups_: runs
-of consecutive entries of one dialect. String attributes are written as indices
-into a `Mlir.Bytecode.StringTable`, and dialects as indices into a
-`Mlir.Bytecode.DialectSection` registry. This module adds nothing to either,
-and a string or dialect missing from them is written as -1 too.
+In the data section, locations, attributes and builtin types are written in the
+binary form of MLIR's builtin dialect. A `NamedStruct`, such as `llvm.ptr`, and
+an `OpaqueAttr` are _assembly-text entries_: each is written instead as its
+text, the way it is spelt in an MLIR text file, and filed under a dialect read
+from that text, by `Mlir.Bytecode.StringTable.splitDialect` for a
+`NamedStruct` and `Mlir.Bytecode.StringTable.opaqueAttrDialect` for an
+`OpaqueAttr`. A second section, the _offset section_, gives the length of each
+entry and the dialect it belongs to, in _dialect groups_: runs of consecutive
+entries of one dialect. String attributes are written as indices into a
+`Mlir.Bytecode.StringTable`, and dialects as indices into a
+`Mlir.Bytecode.DialectSection` registry, which needs every dialect that
+`entryDialects` lists. This module adds nothing to either, and a string or
+dialect missing from them is written as -1 too.
 
 @docs AttrTypeTable, typeIndex, locIndex, dictAttrIndex, bytecodeAttrs
 @docs StreamAccum, encodeDataAndOffsets, finalizeStreamAccum, initStreamAccum, streamAccumEncodingView, streamCollectOp
@@ -63,9 +78,9 @@ import Bitwise
 import Bytes
 import Bytes.Decode as BD
 import Bytes.Encode as BE
-import Mlir.Bytecode.Int64 as Int64
 import Dict exposing (Dict)
 import Mlir.Bytecode.DialectSection as DialectSection exposing (DialectRegistry)
+import Mlir.Bytecode.Int64 as Int64
 import Mlir.Bytecode.StringTable as StringTable exposing (StringTable)
 import Mlir.Bytecode.VarInt exposing (encodeSignedVarInt, encodeVarInt)
 import Mlir.Loc exposing (Loc(..))
@@ -88,39 +103,41 @@ import OrderedDict
 {-| One entry of the attribute list or the type list, in the form it is encoded
 from.
 
-The constructors up to `EUnitAttr` are attributes and the rest are types. Every
-one except `EAsmType` is written in the builtin dialect's binary form.
+The constructors up to `EUnitAttr`, and `EAsmAttr`, are attributes, locations
+included; the rest are types. Every one except `EAsmType` and `EAsmAttr` is
+written in the builtin dialect's binary form.
 
 `EUnknownLoc` is MLIR's unknown location. `EFileLineColLoc` carries a file
 name, a line and a column.
 
 `EStringAttr` carries text, which is written as its index in the string table.
 
-`EIntegerAttr` carries the integer's type, then its value. `EFloatAttr` carries
-the value, then its type.
+`EIntegerAttr` and `EFloatAttr` carry a value and its type, which is written as
+its index in the type list.
 
 `ETypeAttr` is a type used as an attribute.
 
 `EArrayAttr` is a list of attributes, written as their indices.
 `EDenseArrayAttr` carries an element type and the integers, which are written
-as raw bytes, each in the width of the element type (1 byte for `i1` and `i8`,
-4 for `i32`, 8 for `i64`).
+as raw bytes: 1 byte each for `I1` and `I8`, 4 for `I32`, and 8 for every other
+element type.
 
 `ESymbolRefAttr` refers to a symbol by name, and is written as the index of the
 string attribute holding that name.
 
-`EDictAttr` is an operation's whole attribute dictionary. Each name is written
-as the index of the string attribute holding it, and each value as its index.
+`EDictAttr` is an attribute dictionary: an operation's whole dictionary, or a
+`DictAttr` value. Each name is written as the index of the string attribute
+holding it, and each value as its index.
 
 `EUnitAttr` carries nothing.
 
-`EIntegerType` carries a width in bits. `EFloat64Type` is the 64-bit float
-type. `EFunctionType` carries input and result types, written as their
-indices.
+`EIntegerType` is a signless integer type and carries its width in bits.
+`EFloat64Type` is the 64-bit float type. `EFunctionType` carries input and
+result types, written as their indices.
 
-`EAsmType` is the entry for a `NamedStruct`. It carries the text before the
-name's first `.` as its dialect, and the type's assembly text, such as
-`!eco.value`, which is written in place of a binary form.
+`EAsmType` is the entry for a `NamedStruct`. It carries, as its dialect, the
+name up to its first `.`, or the whole name if it has none, and the type's
+assembly text, such as `!llvm.ptr`, which is written in place of a binary form.
 
 `EIndexType` is MLIR's `index` type, and `ESignedIntegerType` a signed integer
 type of the width it carries.
@@ -216,9 +233,10 @@ locIndex loc (AttrTypeTable tbl) =
 {-| Returns the index of the attribute dictionary `attrs` in the attribute list,
 or -1 if the table does not hold it.
 
-Collection records an operation's dictionary as `bytecodeAttrs` returns it. A
-dictionary that still holds `_operand_types` is not found, so look up the
-dictionary `bytecodeAttrs` returns. An empty dictionary is never collected.
+Collection adds an operation's dictionary as `bytecodeAttrs` returns it, and
+only when that is not empty, so look up what `bytecodeAttrs` returns. A
+dictionary that still holds `_operand_types`, or an empty one, gets -1 unless
+a `DictAttr` value sharing its key was collected.
 
 -}
 dictAttrIndex : Dict String MlirAttr -> AttrTypeTable -> Int
@@ -242,8 +260,9 @@ still have different keys.
 
 The parts of an untyped array or of a dictionary are each length-prefixed, so
 text inside them (a `,`, a `=`) cannot make two different lists share a key.
-`String.fromFloat` gives 0 and -0 the same text, so those two float attributes
-still share a key.
+`String.fromFloat` gives 0 and -0 the same text, so two float attributes of one
+type, one 0 and the other -0, still share a key, as do two dictionaries that
+differ only there.
 
 -}
 attrToKey : MlirAttr -> String
@@ -275,10 +294,6 @@ attrToKey attr =
         ArrayAttr (Just t) items ->
             case singleDigitValues items of
                 Just digits ->
-                    -- One flat segment for arrays of single digits (every
-                    -- `slot_kinds` array): keys are compared on every table
-                    -- lookup, and a key joined from one piece per element
-                    -- costs a walk over all those pieces per comparison.
                     "da#" ++ typeToKey t ++ ":" ++ String.fromList digits
 
                 Nothing ->
@@ -317,9 +332,8 @@ attrToKey attr =
             "o:" ++ s
 
 
-{-| The elements of a dense array as digit characters, when every element is an
-`IntAttr` between 0 and 9 (always the case for `slot_kinds`); `Nothing`
-otherwise.
+{-| Returns `items` as digit characters when every one is an `IntAttr` from 0 to
+9, and `Nothing` otherwise.
 -}
 singleDigitValues : List MlirAttr -> Maybe (List Char)
 singleDigitValues items =
@@ -368,7 +382,7 @@ lengthPrefixed attr =
 
 
 {-| Returns the entry key of `ty`: its MLIR spelling, such as `i64` or
-`!eco.value`, or for a function type the keys of its inputs and of its results.
+`!llvm.ptr`, or for a function type the keys of its inputs and of its results.
 -}
 typeToKey : MlirType -> String
 typeToKey ty =
@@ -500,9 +514,9 @@ streamCollectOp op (StreamAccum acc) =
 
 {-| Returns the finished table, for `encodeDataAndOffsets` to write.
 
-Entries keep the indices they were given during collection. The builtin types
-are not moved ahead of the others, so the types stay in the order they were
-found and a dialect's entries may be split across several dialect groups.
+Entries keep the indices they were given during collection, attributes and
+types each in the order they were first met, so a dialect's entries may be
+split across several dialect groups.
 
 -}
 finalizeStreamAccum : StreamAccum -> AttrTypeTable
@@ -726,8 +740,8 @@ attrEntryDialect entry =
 {-| Returns the entry `ty` is encoded as.
 
 A `NamedStruct` becomes an assembly-text entry. Its dialect is the part of its
-name before the first `.`, or the whole name if there is no `.`, and its text
-is the name with `!` in front of it.
+name before the first `.`, or the whole name if there is no `.` (the name is
+not cut at a `<`), and its text is the name with `!` in front of it.
 
 -}
 typeToEntry : MlirType -> Entry
@@ -777,15 +791,15 @@ typeEntryDialect entry =
 {-| Returns an operation's attribute dictionary `attrs` as it is written to
 bytecode, which is without `_operand_types`.
 
-`Mlir.Pretty` takes the operand types it prints from `_operand_types`, and
-nothing in the bytecode encoder reads it.
-Only that exact name is removed. Other names that start with an underscore,
-such as `_fast_evaluator`, are kept and written.
+`_operand_types` is this package's own way of giving operand types to the text
+writer, as `Mlir.Mlir.MlirOp` describes, and bytecode does not hold operand
+types. Only that exact name is removed. Other names that start with an
+underscore, such as `_my_flag`, are kept and written.
 
-Collection records the dictionary this returns, and the encoder finds the
-dictionary's index by looking it up again with `dictAttrIndex`. So a
-dictionary looked up while it still holds `_operand_types` gives -1; look up
-what this function returns.
+Collection records the dictionary this returns when it is not empty, so look up
+what this function returns. A dictionary that still holds `_operand_types` is
+not found unless a `DictAttr` value sharing its key was collected (see
+`dictAttrIndex`).
 
 -}
 bytecodeAttrs : Dict String MlirAttr -> Dict String MlirAttr
@@ -841,8 +855,10 @@ itself.
 
 That is the type of a typed array, of a typed float, of a type attribute or of
 an integer (`i64` for an untyped `IntAttr`, `i1` for a `BoolAttr`); the string
-attribute holding a symbol reference's name; and each element of an untyped
-array, together with what it refers to in turn.
+attribute holding a symbol reference's name; each element of an untyped
+array, together with what it refers to in turn; and each name of a nested
+dictionary, as a string attribute, and each of its values, with what that
+refers to.
 
 -}
 collectAttrDeep : MlirAttr -> Accum -> Accum
@@ -893,8 +909,7 @@ collectRegion (MlirRegion r) acc =
 
 {-| Adds the types of the block's arguments, `Mlir.Loc.unknown` if it has any
 arguments, and what `collectOp` adds for each of its operations and its
-terminator.
-`Mlir.Bytecode.IrSection` gives every block argument that location.
+terminator. `Mlir.Bytecode.IrSection` gives every block argument that location.
 -}
 collectBlock : MlirBlock -> Accum -> Accum
 collectBlock blk acc =
@@ -1010,8 +1025,8 @@ computeEncodedGroups st ((AttrTypeTable tbl) as table) =
     attrGroups ++ typeGroups
 
 
-{-| The width in bytes of one element of a dense array of `ty`: 1 for `i1`
-and `i8`, 4 for `i32`, and 8 otherwise (`i64`).
+{-| Returns the width in bytes of one element of a dense array of `ty`: 1 for
+`i1` and `i8`, 4 for `i32`, and 8 for any other type.
 -}
 denseElemBytes : MlirType -> Int
 denseElemBytes ty =
@@ -1029,9 +1044,11 @@ denseElemBytes ty =
             8
 
 
-{-| One dense array element `v` in `w` bytes, little-endian two's complement.
-An 8-byte element carries all 64 bits (`Mlir.Bytecode.Int64.toWords`); the
-common case of a value in [0, 2^31) skips the split.
+{-| Creates an encoder for one dense array element `v` in `w` bytes,
+little-endian two's complement, keeping the low bits of a value too wide for
+them. A `w` other than 1, 2 or 4 gives 8 bytes, which carry all 64 bits as
+`Mlir.Bytecode.Int64.toWords` gives them; a value from 0 to 2^31 − 1 skips that
+split.
 -}
 encodeDenseElem : Int -> Int -> BE.Encoder
 encodeDenseElem w v =
@@ -1128,14 +1145,16 @@ other entries written as their indices in `tbl` and a string attribute's text
 as its index in `st`. An `EAsmType` or `EAsmAttr` is instead its assembly
 text followed by a zero byte.
 
-An integer attribute's value is a single byte when its type is 8 bits wide or
-less, and otherwise a zigzag-encoded varint. A dense array's elements are 8
-bytes each, the low 32 bits of the value then four zero bytes, whatever the
-element type. A float is written by `encodeAPFloat`.
+An integer attribute's value is a single byte, its low 8 bits, when its type is
+8 bits wide or less, and otherwise a zigzag-encoded PrefixVarInt (see
+`Mlir.Bytecode.VarInt`), whatever the width. A dense array's elements are
+1 byte each for `I1` and `I8`, 4 for `I32`, and 8, carrying all 64 bits, for
+every other element type. A float's value is its 64-bit IEEE 754 form,
+whatever its type, written by `encodeAPFloat`.
 
 A file location's name is looked up as a string attribute, and collection does
-not add one for it, so it is written as -1 unless the same text is a string
-attribute somewhere else.
+not add one for it, so it is written as -1 unless the same text was collected
+as a string attribute for another reason.
 
 -}
 encodeEntry : StringTable -> AttrTypeTable -> Entry -> BE.Encoder
@@ -1287,9 +1306,10 @@ holds a 64-bit float: the 64 bits of its IEEE 754 form, taken as a signed
 integer, zigzag-encoded and written as a PrefixVarInt (as
 `Mlir.Bytecode.VarInt` describes both).
 
-An `Int` cannot hold every 64-bit integer exactly, so the zigzag step is done
-on the two 32-bit halves of the bits, and the result is always written in the
-9-byte form, which holds any 64-bit value.
+An `Int` cannot hold every 64-bit integer exactly on every host (see
+`Mlir.Bytecode.Int64`), so the zigzag step is done on the two 32-bit halves of
+the bits, and the result is always written in the 9-byte form, which holds any
+64-bit value.
 
 -}
 encodeAPFloat : Float -> BE.Encoder

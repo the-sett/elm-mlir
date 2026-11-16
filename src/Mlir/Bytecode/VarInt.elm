@@ -1,13 +1,13 @@
 module Mlir.Bytecode.VarInt exposing (encodeVarInt, encodeSignedVarInt, varIntWidth)
 
-{-| The MLIR bytecode format stores integers such as counts and table indices
-in a variable-length form called PrefixVarInt, and this module writes that form.
+{-| MLIR bytecode holds numbers such as counts, lengths and table indices in a
+variable-length form called PrefixVarInt, and this module writes that form.
 
-A _PrefixVarInt_ is a little-endian integer of one to nine bytes whose first
-byte says how long it is: the number of trailing zero bits in the first byte,
-plus one, is the total number of bytes. The bits above the lowest set bit hold
-the low bits of the value, and the following bytes hold the rest. A first byte
-of zero therefore means eight more bytes, which hold the whole value as a
+A _PrefixVarInt_ is a little-endian unsigned integer of one to nine bytes whose
+first byte says how long it is: the number of trailing zero bits in the first
+byte, plus one, is the total number of bytes. The bits above the lowest set bit
+hold the low bits of the value, and the following bytes hold the rest. A first
+byte of zero therefore means eight more bytes, which hold the whole value as a
 64-bit integer.
 
     xxxxxxx1:  7 value bits, 1 byte
@@ -20,20 +20,23 @@ of zero therefore means eight more bytes, which hold the whole value as a
     10000000: 56 value bits, 8 bytes
     00000000: 64 value bits, 9 bytes
 
-This module writes only the 1-, 2-, 3-, 4- and 9-byte forms, and the reason is
-the width of `Bitwise`. Under JavaScript, Elm's `Bitwise` operations work on
-32-bit integers, so a value can be shifted into place beside its length bits
-only while it fits in 28 bits. Every value at or above 2^28 is written in the
-9-byte form instead, where the value is not shifted left beside length bits
-but split into two unsigned 32-bit words (`Mlir.Bytecode.Int64.toWords`). That
-split is exact for every value the host holds exactly: natively every `Int`,
-and under JavaScript every whole number within the 64-bit range. A negative
-value is also written in the 9-byte form, as its 64-bit two's complement.
+This module writes only the 1-, 2-, 3-, 4- and 9-byte forms. A short form is
+made by shifting the value left beside its length bits, and under JavaScript
+`Bitwise` works on 32 bits (`Mlir.Bytecode.Int64` describes the two hosts), so
+28 value bits are the most such a shift can place. When `encodeVarInt` is given
+a value at or above 2^28, it writes the 9-byte form instead, which needs no such
+shift: its eight bytes are the word pair that `Mlir.Bytecode.Int64.toWords`
+gives. A negative value given to `encodeVarInt` is written in the 9-byte form
+too, as its 64-bit two's complement, so -1 is written as 2^64 − 1. Nothing is
+rejected.
+
+The 9-byte form is exact for a value from −2^63 to 2^63 − 1, the range over
+which `toWords` is exact. Under JavaScript a whole number outside that range is
+written as its low 64 bits.
 
 _Zigzag encoding_ maps a signed integer to an unsigned one so that values of
 small magnitude stay small: 0, -1, 1, -2, 2 become 0, 1, 2, 3, 4.
-`encodeSignedVarInt` applies it before writing a PrefixVarInt, on the two
-32-bit words when the doubled value would not be exact under JavaScript.
+`encodeSignedVarInt` writes a value zigzag-encoded as a PrefixVarInt.
 
 @docs encodeVarInt, encodeSignedVarInt, varIntWidth
 
@@ -48,11 +51,12 @@ import Mlir.Bytecode.Int64 as Int64
 {-| Creates an encoder that writes `value` as a PrefixVarInt.
 
 A `value` from 0 to below 2^28 is written in the shortest of the 1-, 2-, 3-
-and 4-byte forms that holds it. Anything larger is written in the 9-byte
-form.
+and 4-byte forms that holds it, and one at or above 2^28 in the 9-byte form.
 
 A negative `value` is not rejected. It is written in the 9-byte form as its
-64-bit two's complement, that is, as the unsigned integer 2^64 + `value`.
+64-bit two's complement, that is, as the unsigned integer 2^64 + `value`, so
+`-1` is written as 2^64 − 1. This holds down to −2^63; under JavaScript a whole
+number outside the range −2^63 to 2^63 − 1 is written as its low 64 bits.
 
 -}
 encodeVarInt : Int -> BE.Encoder
@@ -129,9 +133,8 @@ varIntWidth value =
         9
 
 
-{-| Creates an encoder that writes `value` in the 9-byte form. `encodeVarInt`
-uses it for every value at or above 2^28, and it does nothing beyond
-`encode9Bytes`.
+{-| Creates an encoder that writes `value` in the 9-byte form, exactly as
+`encode9Bytes` does.
 -}
 encodeLargeVarInt : Int -> BE.Encoder
 encodeLargeVarInt value =
@@ -139,8 +142,12 @@ encodeLargeVarInt value =
 
 
 {-| Creates an encoder that writes `value` in the 9-byte form: a zero byte, then
-`value` as a 64-bit little-endian two's complement integer, exact for every
-value the host holds exactly.
+`value` as a 64-bit little-endian two's complement integer.
+
+This is exact for a `value` from −2^63 to 2^63 − 1, which on a 64-bit host is
+every `Int`. Under JavaScript a whole number outside that range, although the
+host may hold it exactly, is written as its low 64 bits.
+
 -}
 encode9Bytes : Int -> BE.Encoder
 encode9Bytes value =
@@ -151,8 +158,9 @@ encode9Bytes value =
     encodeWords9 hi lo
 
 
-{-| Creates an encoder that writes the 9-byte form of the 64-bit value whose
-unsigned 32-bit words are `hi` and `lo`.
+{-| Creates an encoder that writes the 9-byte form of the 64-bit value whose word
+pair is `( hi, lo )`: a zero byte, then `lo` and `hi`, each as four
+little-endian bytes.
 -}
 encodeWords9 : Int -> Int -> BE.Encoder
 encodeWords9 hi lo =
@@ -163,14 +171,14 @@ encodeWords9 hi lo =
         ]
 
 
-{-| Creates an encoder that writes `value` zigzag-encoded as a PrefixVarInt: a
-`value` of zero or more becomes `2 * value`, and a negative one becomes
-`-2 * value - 1`, both taken as unsigned 64-bit integers.
+{-| Creates an encoder that writes `value` zigzag-encoded as a PrefixVarInt. A
+`value` from −2^63 to 2^63 − 1 becomes `2 * value` if it is zero or more and
+`-2 * value - 1` if it is negative, a number from 0 to 2^64 − 1.
 
-When the magnitude of `value` is below 2^52 the doubled value is below 2^53 and
-is computed directly, exact on both hosts. Otherwise the zigzag is computed as
-`(value << 1) ^ (value >> 63)` on the two 32-bit words of `value` and written
-in the 9-byte form, so every 64-bit value, `-2^63` included, is exact.
+On either host, a `value` whose magnitude is below 2^52 is zigzag-encoded by
+that arithmetic, which keeps the result below 2^53 and so exact under
+JavaScript too. Any other `value` is written in the 9-byte form, computed from
+its word pair.
 
 -}
 encodeSignedVarInt : Int -> BE.Encoder
@@ -205,7 +213,8 @@ encodeSignedVarInt value =
         encodeWords9 (u32 (Bitwise.xor shiftedHi sign)) (u32 (Bitwise.xor shiftedLo sign))
 
 
-{-| Returns the low 32 bits of `x` as an unsigned number, on either host.
+{-| Returns the low 32 bits of `x` as a word, from 0 to 2^32 − 1, on either
+host.
 -}
 u32 : Int -> Int
 u32 x =

@@ -19,7 +19,7 @@ location-shaped string had been merged with a location, the probe's index
 would be one lower than in the control.
 
 Every op is built with `makeStringLiteralOp`: an op named
-`eco.string_literal` whose only attribute is `value`, a `StringAttr`.
+`test.string_literal` whose only attribute is `value`, a `StringAttr`.
 
 What the tests establish:
 
@@ -42,16 +42,16 @@ import Mlir.Mlir exposing (MlirAttr(..), MlirOp, MlirType(..))
 import Test exposing (Test)
 
 
-{-| Builds an op named `eco.string_literal` at `loc` whose only attribute is
-`value`, holding the given string. It has one `eco.value` result and no
+{-| Builds an op named `test.string_literal` at `loc` whose only attribute is
+`value`, holding the given string. It has one `test.value` result and no
 operands, regions or successors.
 -}
 makeStringLiteralOp : Loc -> String -> MlirOp
 makeStringLiteralOp loc value =
-    { name = "eco.string_literal"
+    { name = "test.string_literal"
     , id = "op_0"
     , operands = []
-    , results = [ ( "%0", NamedStruct "eco.value" ) ]
+    , results = [ ( "%0", NamedStruct "test.value" ) ]
     , attrs = Dict.singleton "value" (StringAttr value)
     , regions = []
     , isTerminator = False
@@ -78,7 +78,7 @@ probeLoc =
 -}
 collectWithProbe : List MlirOp -> AttrType.AttrTypeTable
 collectWithProbe ops =
-    (ops ++ [ { name = "eco.probe", id = "op_p", operands = [], results = [], attrs = Dict.empty, regions = [], isTerminator = False, loc = probeLoc, successors = [] } ])
+    (ops ++ [ { name = "test.probe", id = "op_p", operands = [], results = [], attrs = Dict.empty, regions = [], isTerminator = False, loc = probeLoc, successors = [] } ])
         |> List.foldl AttrType.streamCollectOp AttrType.initStreamAccum
         |> AttrType.finalizeStreamAccum
 

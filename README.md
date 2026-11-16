@@ -1,11 +1,12 @@
 # elm-mlir
 
-Build [MLIR](https://mlir.llvm.org) programs in Elm, and write them out as MLIR's generic text or as
-MLIR bytecode, the binary form MLIR tools load directly. Nothing outside Elm is needed: no LLVM,
-no MLIR library, no ports.
+Build [MLIR](https://mlir.llvm.org) programs in Elm, and write them out as MLIR text or as MLIR
+bytecode, the binary form MLIR tools load directly. It is pure Elm: no LLVM, no MLIR library and
+no ports are needed to produce the output, only to consume it.
 
-It is the MLIR library of the eco Elm compiler, whose native back end builds its whole output with
-it.
+```
+elm install the-sett/elm-mlir
+```
 
 ## An example
 
@@ -72,48 +73,76 @@ text =
 
 bytecode : Bytes
 bytecode =
-    StreamEncode.assembleModule
+    StreamEncode.assembleModule "answer-example"
         (StreamEncode.collectAndEncodeOps [ answer ] StreamEncode.emptyStreamTables)
         Loc.unknown
 ```
 
-`mlir-opt` reads either form, so `mlir-opt answer.mlirbc` prints the module back as text.
+`mlir-opt` reads either form, so `mlir-opt answer.mlirbc` prints the module back as text. The
+first argument of `assembleModule` names the program that wrote the file; MLIR shows it with any
+error it reports while reading.
+Building `OrderedDict` regions needs `j-maas/elm-ordered-containers`, which this package depends
+on.
 
-## The model
+## The modules
 
-`Mlir.Mlir` is a generic model of MLIR: an operation is its name (`dialect.op`), the names of the
-SSA values it reads and defines, a dictionary of attributes, its regions and its location. Nothing
-here knows which operations a dialect has, so any dialect can be written, and nothing checks that an
-operation makes sense. That is MLIR's verifier's job when it reads the output.
+- **`Mlir.Mlir`** is the program: operations, regions, blocks, attributes and types, as plain
+  Elm values, plus a small builder that draws each operation's `id` from an environment you
+  thread through.
+- **`Mlir.Pretty`** writes MLIR's generic text form, which MLIR reads for any dialect without
+  knowing its custom syntax.
+- **`Mlir.Bytecode.StreamEncode`** writes bytecode, taking the top-level operations a batch at a
+  time: each batch is encoded as soon as it is added and only its bytes are kept, so a large
+  program need not be held in memory at once.
+- **`Mlir.Loc`** is the source location every operation carries.
+
+## The model is generic
+
+An operation is its name (`dialect.op`), the names of the SSA values it reads and defines, a
+dictionary of attributes, its regions and its location. Nothing in the package knows which
+operations a dialect has, so any dialect can be written, and nothing checks that an operation
+makes sense: that is MLIR's verifier's job when it reads the output.
 
 The attributes and types are a fixed set: integers, floats, strings, booleans, types, arrays and
-dense arrays, dictionaries, symbol references and unit attributes; signless and signed integer,
-index, float and function types. Anything else is written as its text: a dialect's type by its
-name, as `NamedStruct "llvm.ptr"` is written `!llvm.ptr`, and any other attribute as
-`OpaqueAttr "#mosh<ape[2]> : !mosh.ape"`. MLIR parses that text when it reads the program.
+dense integer arrays, dictionaries, symbol references and unit attributes; `i1`, `i8`, `i32`,
+`i64`, signed integers, `index`, `f64` and function types. Anything else is written as its MLIR
+text: a type of any dialect other than builtin by its name, as `NamedStruct "llvm.ptr"` is
+written `!llvm.ptr`, and any other attribute as `OpaqueAttr "#llvm.linkage<internal>"`. MLIR
+parses that text when it reads the program. A builtin type outside the set, such as `f32` or
+`tensor<4xi32>`, cannot be expressed.
 
-`Mlir.Mlir.mlirOp` and `opBuilder` build an operation step by step, drawing its `id` from an
-environment the caller threads through.
+Value names are written as given, so they carry MLIR's `%` (`"%c"`), and successors their `^`.
 
-## Text and bytecode
+## Which MLIR reads the output
 
-- `Mlir.Pretty` prints MLIR's generic form, which MLIR reads for any dialect without knowing its
-  custom syntax.
-- `Mlir.Bytecode.StreamEncode` writes bytecode (format version 4) and takes the operations a batch
-  at a time, so a large program need not be held in memory at once: each batch is encoded as soon
-  as it is added.
+The bytecode declares format version 4. MLIR's bytecode reader accepts every format version up
+to its own, and the builtin attribute and type encodings written here are the same from LLVM 21
+to at least LLVM 24, so the same bytes load in both. What does change between LLVM releases is
+the dialects themselves, operation names and attributes, which is a matter for the program being
+built, not for this package.
 
-The same output is read by MLIR from LLVM 21 to at least LLVM 24: bytecode carries its own format
-version, which MLIR reads back to version 0, and the builtin attribute and type encodings written
-here are the same across those releases. What changes between LLVM releases is the dialects
-themselves (operation names and attributes), which is a matter for the program being built.
+## Things to know
 
-## Limits
+- **Lookups are not checked.** The bytecode writer refers to names, types, attributes and values
+  by index. Anything it cannot find, such as an operand that names no value in scope, is written
+  as an index that points nowhere: MLIR rejects the file, and the writer itself reports nothing.
+  Each top-level operation is encoded with nothing in scope, so one top-level operation cannot
+  use another's results.
+- **Use `Loc.unknown` for bytecode.** The text writer prints no locations. The bytecode writer
+  writes file locations, but a file location's name is only found if the same text is also used
+  as an attribute name or string attribute value, and the module's own location must be
+  `Loc.unknown` or one an operation carries; otherwise the file is rejected.
+- **Operand types in text.** The text writer looks up each operand's type among the values in
+  scope. Where it cannot see the definition, such as across blocks of a region, give the types
+  with an `ArrayAttr` of `TypeAttr`s named `_operand_types`, a convention of this package.
+- **`callee`.** An operation with an attribute named `callee` has all its attributes printed as
+  `<{...}>` properties in text.
+- **Isolated regions.** The bytecode writer marks the regions of `func.func` and
+  `builtin.module` as isolated from above (counting values again from 0), and of any operation
+  named with `StreamEncode.isolating`. Naming is optional; naming an operation with more than one
+  region, or one whose regions use outer values, gives a file MLIR rejects.
+- **Strings.** A `StringAttr` holds its text with escape sequences still written out
+  (`StringAttr "a\\nb"`). Keep to `\n`, `\t`, `\\`, `\"` and `\uXXXX`, which both writers
+  understand.
 
-- Locations are carried but only file, line and column locations and the unknown location are
-  written; the text printer writes none.
-- The bytecode writer must know which regions are isolated from the values around them, and goes by
-  the operation's name: `func.func` and `builtin.module`, and any operation named with
-  `StreamEncode.isolating`, such as a dialect's own function operation.
-- Lookups are not checked: an operand that names no value, or an attribute missing from the
-  writer's tables, gives a corrupt file rather than an error.
+The module documentation states each of these precisely, with the remaining edge cases.

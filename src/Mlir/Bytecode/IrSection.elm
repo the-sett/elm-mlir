@@ -12,13 +12,10 @@ this:
   - Within one region, the values its blocks define are numbered one after
     another: the entry block's first, then each labelled block's in the order
     of `blocks`, and within a block its arguments, then the results of its
-    operations in order. Regions nested inside those operations are not part
-    of this count.
+    operations in order, ending with its `terminator`. Regions nested inside
+    those operations are not part of this count.
   - A region is _isolated_ when it cannot see values defined outside it. Its
-    numbering starts at 0, and it is written inside an IR section of its own.
-    The regions of the operations named in the `isolated` set the caller
-    gives are treated as isolated; `Mlir.Bytecode.StreamEncode` describes its
-    default.
+    numbering starts at 0.
   - Any other region carries on from where the numbering of the region around
     it stopped, after all of that region's values. Sibling regions of one
     operation, such as the two branches of an `scf.if`, each start from that
@@ -28,18 +25,30 @@ So each region is handled in two passes. The first, `numberRegion`, builds its
 _value environment_, the map from SSA name to value index. The second,
 `encodeRegion`, writes the region using it. Because a region is numbered in
 full before any of it is written, an operand may name a value defined later in
-the region. A nested region is numbered only when the operation holding it is
-written.
+the region, and a name defined twice among the values a region can see refers
+to the definition numbered last. A nested region is numbered only when the
+operation holding it is written.
+
+This module treats a region as isolated by the name of the operation holding
+it and nothing else: the regions of the operations named in the `isolated` set
+the caller gives are treated as isolated, and no others.
+`Mlir.Bytecode.StreamEncode` describes that set. Each region treated as
+isolated is written inside an IR section of its own.
+
+Operations in a block's `body` whose `isTerminator` is set are left out, both
+of the numbering and of what is written.
 
 Blocks are referred to by _block index_ within their region: the entry block
-is 0 and is called `bb0`, and the labelled blocks follow from 1.
+is 0 and is called `bb0`, and the labelled blocks follow from 1. A labelled
+block that is also called `bb0` takes that name over from the entry block.
 
 Nothing here is checked. An operand name missing from the value environment
-is written as -1, and a successor label that names no block as block 0. A
-type, location, attribute dictionary or operation name the tables do not hold
-is written as -1 too, as `Mlir.Bytecode.AttrType` and
-`Mlir.Bytecode.DialectSection` describe. Either way the file is corrupt rather
-than the encoding failing.
+is written as -1, and so is a type, location, attribute dictionary or
+operation name the tables do not hold, as `Mlir.Bytecode.AttrType` and
+`Mlir.Bytecode.DialectSection` describe. `Mlir.Bytecode.VarInt.encodeVarInt`
+writes -1 as 2^64 − 1, so the file is corrupt rather than the encoding
+failing. A successor label that names no block is written not as -1 but as
+block 0, the entry block.
 
 @docs encodeFuncOp
 
@@ -68,7 +77,8 @@ import Set exposing (Set)
 -- ==== Encoding mask bits ====
 
 
-{-| The bit of an operation's encoding mask saying that it has an attribute dictionary.
+{-| The bit of an operation's encoding mask saying that it has an attribute
+dictionary.
 -}
 kHasAttrs : Int
 kHasAttrs =
@@ -162,11 +172,12 @@ registerValues pairs env =
 -- ==== Pass 1: Value Numbering ====
 
 
-{-| Returns `env` extended with value indices for every value defined in the
+{-| Returns `env` extended with value indices for the values defined in the
 blocks of a region, numbered on from `env`'s next index: the entry block, then
 the labelled blocks in order.
 
-The regions nested inside the region's operations are not numbered.
+The results of operations in `body` whose `isTerminator` is set are not
+numbered, and nor are the regions nested inside the region's operations.
 
 -}
 numberRegion : ValueEnv -> MlirRegion -> ValueEnv
@@ -211,8 +222,9 @@ numberOp op env =
 -- ==== Block index environment ====
 
 
-{-| The block index of each block of one region, by label, with the entry block
-under `bb0`.
+{-| The block indices of one region, by label: each labelled block's under its
+label, and the entry block's under `bb0` unless a labelled block is also called
+`bb0`.
 -}
 type alias BlockEnv =
     Dict String Int
@@ -243,10 +255,10 @@ buildBlockEnv (MlirRegion r) =
 
 
 {-| Creates an encoder for a region, given `valueEnv`, its value environment,
-which must already number every value the region's blocks define.
+which must number the region's values as `numberRegion` does.
 
-It writes the number of blocks, the number of values the region's blocks
-define, then the entry block and the labelled blocks in order. Successors are
+It writes the number of blocks, the number of values `countRegionValues` counts
+in them, then the entry block and the labelled blocks in order. Successors are
 resolved against this region's blocks.
 
 -}
@@ -293,7 +305,6 @@ encodeBlock isolated dialectReg attrTypeTable valueEnv blockEnv blk =
         hasBlockArgs =
             not (List.isEmpty blk.args)
 
-        -- A terminator may also be in body; it is written once, as terminator.
         allOps =
             List.filter (\op -> not op.isTerminator) blk.body ++ [ blk.terminator ]
 
@@ -328,13 +339,13 @@ encodeBlock isolated dialectReg attrTypeTable valueEnv blockEnv blk =
         )
 
 
-{-| Creates an encoder for a block's arguments: their number, then each one's
-type index with a flag saying a location follows, and the index of the unknown
-location, then a zero byte.
+{-| Creates an encoder for a block's arguments: their number, then for each one
+its type index shifted left one bit with the low bit set, saying a location
+follows, and the index of `Mlir.Loc.unknown`, then a zero byte.
 
-Every argument gets the unknown location. The zero byte is written after the
-arguments in every case; this module assumes the reader takes it as saying the
-block has no use-list orders.
+The model holds no location for a block argument, so every argument is given
+the unknown location. The zero byte is always written; this module assumes
+the reader takes it as saying the block has no use-list orders.
 
 -}
 encodeBlockArgs : AttrTypeTable -> List ( String, MlirType ) -> BE.Encoder
@@ -375,18 +386,20 @@ region it is in, and `blockEnv`, the block indices of that region.
 
 It writes the operation name's index, an encoding mask byte saying which of
 the optional parts follow, and the location's index. Then come those parts that
-are present, in this order: the index of the attribute dictionary, after
-`Mlir.Bytecode.AttrType.bytecodeAttrs`; the number of results and each result's
-type index; the number of operands and each one's value index; the number of
-successors and each one's block index, looked up with one leading `^` removed;
-and the regions.
+are present, in this order: the index of the attribute dictionary as
+`Mlir.Bytecode.AttrType.bytecodeAttrs` returns it, present only when that is
+not empty; the number of results and each result's type index; the number of
+operands and each one's value index; the number of successors and each one's
+block index, looked up with one leading `^` removed; and the regions. No
+properties and no use-list orders are written.
 
 The regions start with one number holding their count shifted left one bit,
-with the low bit set when they are isolated, which they are when the
-operation's name is in `isolated`. An isolated region is numbered from 0 and wrapped in an IR
-section of its own. Every other region is numbered on from `valueEnv`, each
-separately, so siblings start from the same index and see the names in
-`valueEnv` but not each other's values.
+with the low bit set when the operation's name is in `isolated`. Each region of
+such an operation is numbered from 0 and wrapped in an IR section of its own,
+so one with several regions has one section per region. Every
+other region is numbered on from `valueEnv`, each separately, so siblings start
+from the same index and see the names in `valueEnv` but not each other's
+values.
 
 -}
 encodeOp : Set String -> DialectRegistry -> AttrTypeTable -> ValueEnv -> BlockEnv -> MlirOp -> BE.Encoder
@@ -398,8 +411,7 @@ encodeOp isolated dialectReg attrTypeTable valueEnv blockEnv op =
         locIdx =
             AttrType.locIndex op.loc attrTypeTable
 
-        -- Collection records the dictionary after bytecodeAttrs; one still
-        -- holding _operand_types would not be found and would give -1.
+        -- Without _operand_types, as collected, so the lookup can find it.
         attrs =
             AttrType.bytecodeAttrs op.attrs
 
@@ -581,15 +593,14 @@ encodeOp isolated dialectReg attrTypeTable valueEnv blockEnv op =
         )
 
 
-{-| Creates an encoder for one operation of a module's top level, such as a
-`func.func`, on its own, so that a module can be written one operation at a
-time.
+{-| Creates an encoder for a top-level operation, whatever its name, on its own,
+so that a module's operations can be encoded one at a time. `isolated` names
+the operations, at any depth, whose regions are treated as isolated.
 
 The operation is encoded with an empty value environment and no block
-indices. An isolated region inside it, such as a `func.func`'s body, is
-numbered from 0 as usual, but an operand of the operation itself is written as
--1 and a successor as block 0. The regions of the operations named in
-`isolated` are isolated.
+indices. So an operand of the operation itself is written as -1 and a
+successor as block 0, and each of its regions is numbered from 0, isolated or
+not. The operation's own results get no value index.
 
 -}
 encodeFuncOp : Set String -> DialectRegistry -> AttrTypeTable -> MlirOp -> BE.Encoder

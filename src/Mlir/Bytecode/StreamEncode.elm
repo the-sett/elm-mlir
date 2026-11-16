@@ -1,43 +1,58 @@
 module Mlir.Bytecode.StreamEncode exposing (StreamTables, emptyStreamTables, isolating, collectAndEncodeOps, assembleModule)
 
-{-| Writes an MLIR bytecode file from operations handed over a batch at a time,
-so that a program's operations need not all be held in memory at once: each
-batch is encoded to bytes as soon as it is added, and only the bytes are kept.
+{-| Writes an MLIR program built with `Mlir.Mlir` as an MLIR bytecode file. It
+takes the program's top-level operations a batch at a time, so that a caller
+need not hold them all at once: each batch is encoded to bytes as soon as it is
+added, and only the bytes are kept.
 
-MLIR bytecode refers to the operation names, attributes, types and locations
-an operation uses, and to most strings, by their index in a table section near
-the start of the file, rather than writing them where they are used.
-The IR section, which holds the operations, comes after the tables. Encoding an
-operation before the tables are complete is therefore safe only if every index
-is _append-only_: a new entry takes the next free index, in the order entries
-are first met, and an entry's index never changes after that. The string table
-and the streaming attribute and type table work this way, as
-`Mlir.Bytecode.StringTable` and `Mlir.Bytecode.AttrType.StreamAccum` describe.
-This module numbers operation names the same way, and keeps these tables
-together in `StreamTables`.
+MLIR bytecode does not write an operation's name, attributes, types, location
+or most strings where the operation uses them. It writes each once, in tables
+near the start of the file, and the operation refers to it by its _index_ in a
+table. An operation can therefore be encoded before the tables are complete
+only because every index here is _append-only_: an index never changes once
+given. A _batch_ is the list of top-level operations given to one call of
+`collectAndEncodeOps`. What its operations use is added to the tables, with
+some exceptions, among them those described below, and then each operation is
+encoded against them. `StreamTables` holds the tables and the bytes between
+batches, and `assembleModule` writes the tables and then every operation, in the
+order they were added, inside one `builtin.module` operation. The file declares
+bytecode version 4.
 
-Append-only numbering shapes the dialect section. An operation name is a
-_dialect_, the text before its first `.`, and a _suffix_, the rest, and the
-section lists the names in _op groups_, each a dialect followed by suffixes of
-that dialect's names. A name's index is its position across all the groups.
-Names of different dialects may be met interleaved, so each run of
-consecutive names of one dialect, in the order they were numbered, becomes a
-group of its own, and a dialect may have several groups. That keeps every name
-at the position it was numbered. The attribute and type offset section is
-grouped in runs for the same reason, as
-`Mlir.Bytecode.AttrType.finalizeStreamAccum` describes.
+In bytecode, an operation refers to the values it reads by number, and the
+reader works the numbers out by counting values as it reads them. A region
+marked in the file as _isolated from above_ starts counting again from 0.
+MLIR's reader goes by that mark, not by the operation's definition. This
+writer marks a region isolated by the name of the operation holding it, as
+`emptyStreamTables` and `isolating` describe.
 
-`emptyStreamTables` starts the tables, `isolating` names any further
-operations whose regions are isolated from above, `collectAndEncodeOps` adds a
-batch, and `assembleModule` writes the file. An operation is encoded only after every
-operation of its batch has been collected into the tables. A lookup is not
-checked: anything missing from the tables is written as the index -1, so the
-file is corrupt rather than the encoding failing.
+Nothing is checked as it is written. A name, type, location or attribute
+dictionary missing from the tables, and an operand that names no value in
+scope, are written as the index -1, which comes out as a nine-byte number that
+points at no entry. The file is then corrupt, and the writer reports no error.
+Besides the cases `collectAndEncodeOps` and `assembleModule` describe, one case
+that arises in ordinary use is a file location, which `Mlir.Loc` describes. Its
+file name is written as a reference to a string attribute with the same text,
+which is in the tables only if that text was collected as a string attribute
+for another reason, such as an attribute's name or an operation's `StringAttr`
+value.
 
-The file declares bytecode version 4. Its operations sit in one
-`builtin.module` operation, whose single block holds every encoded operation in
-the order they were added. The lengths that frame the IR section are computed
-from the widths of the bytes already encoded.
+Some mistakes are not written as -1 and are not reported either. For example, a
+successor label that names no block of its region is written as the region's
+entry block.
+
+An attribute or type used more than once is written once, as an entry that
+every use refers to, except a use as an element of a typed `ArrayAttr`, which
+refers to no entry. Some values that are written alike share an entry, such
+as `BoolAttr True` and the `i1` integer 1, but not every pair written alike
+does. A `TypedFloatAttr` of 0 and one of -0 of the same type also share an
+entry, though they are not written alike, so both are written with the sign of
+whichever was met first; so do two attribute dictionaries that differ only
+there.
+
+A `NamedStruct` type and an `OpaqueAttr` are written as their MLIR text, under
+the dialect read from that text as `Mlir.Mlir.MlirType` and
+`Mlir.Mlir.MlirAttr` describe. The text is not checked here; it is parsed only
+by whatever reads the file.
 
 @docs StreamTables, emptyStreamTables, isolating, collectAndEncodeOps, assembleModule
 
@@ -68,12 +83,12 @@ import Set exposing (Set)
 -- ==== Stream Tables (accumulator) ====
 
 
-{-| The tables of a bytecode file being written a batch at a time, together
-with the bytes of every operation encoded so far.
+{-| A bytecode file being written a batch at a time.
 
-A value starts as `emptyStreamTables` and grows through `collectAndEncodeOps`.
-Every index it has given out keeps its meaning as it grows, so the bytes it
-holds are still right when `assembleModule` writes the tables they refer to.
+Start from `emptyStreamTables`, add batches with `collectAndEncodeOps`, and
+write the file with `assembleModule`. An index never changes once given, so
+the bytes of an early batch are still right when `assembleModule` writes the
+tables they refer to.
 
 -}
 type StreamTables
@@ -87,15 +102,11 @@ type StreamTables
         }
 
 
-{-| The tables before any operation is added.
+{-| A file to which no operation has been added yet.
 
-They already hold the names the enclosing `builtin.module` operation needs,
-since that operation is in no batch: the strings `builtin` and `module`, and
-the operation name `builtin.module`, numbered 0 in a dialect `builtin`
-numbered 0. They also hold `Mlir.Loc.unknown`.
-
-The regions of `func.func` and `builtin.module` are isolated from above, and
-those of no other operation until `isolating` names it.
+The writer marks the regions of `func.func` and `builtin.module` operations as
+isolated from above, and those of no other operation until `isolating` names
+it.
 
 -}
 emptyStreamTables : StreamTables
@@ -113,17 +124,22 @@ emptyStreamTables =
         }
 
 
-{-| Adds operations, by name, to those whose regions are isolated from above.
+{-| Adds operations, by name, to those whose regions the writer marks as
+isolated from above, wherever in the program they appear. A name applies only
+to batches added after the call.
 
-An isolated region sees no value defined outside it, and bytecode numbers its
-values from 0, so the writer must know which regions are isolated, and an
-operation's name is all it goes by. An operation that MLIR's definition marks
-`IsolatedFromAbove`, such as a dialect's own function operation, must be named
-here, or the values its regions read are numbered wrongly. Name them before
-adding any operation: a batch already added was encoded without them.
+Naming an operation is optional. What it changes is that each of the
+operation's regions starts counting values again from 0 and is written in a
+section of the file of its own.
+
+Naming an operation gives a file that MLIR rejects when its regions use a
+value defined outside them, because such an operand is written as -1. So does
+naming an operation that has more than one region, because each region of a
+named operation is written in a section of the file of its own, where MLIR's
+reader expects all of them in one.
 
     StreamEncode.emptyStreamTables
-        |> StreamEncode.isolating [ "mo.graph" ]
+        |> StreamEncode.isolating [ "llvm.func" ]
 
 -}
 isolating : List String -> StreamTables -> StreamTables
@@ -131,13 +147,17 @@ isolating names (StreamTables st) =
     StreamTables { st | isolated = List.foldl Set.insert st.isolated names }
 
 
-{-| Adds `ops`, a batch of top-level operations, to the tables and encodes each
-of them, keeping their bytes in order after those of earlier batches.
+{-| Adds `ops`, a batch of top-level operations, to the file, after those of
+earlier batches.
 
-First the strings, operation names, attributes, types and locations of every
-operation in the batch, and of the operations nested inside them, are added.
-Then each operation is encoded, as `Mlir.Bytecode.IrSection.encodeFuncOp`
-describes, against the tables as they stand once the whole batch is in them.
+What the operations of the batch use, and what the operations nested in them
+use, is added to the tables, with some exceptions, among them those the module
+documentation describes. The batch is encoded as it is added, and only its
+bytes are kept. They are final: later batches do not change them.
+
+Each top-level operation is encoded on its own, with no values in scope. So an
+operand of the operation itself is written as -1, and nothing can refer to its
+results.
 
 -}
 collectAndEncodeOps : List MlirOp -> StreamTables -> StreamTables
@@ -178,23 +198,28 @@ collectAndEncodeOps ops (StreamTables st) =
         }
 
 
-{-| Returns the whole bytecode file for every operation added to the tables,
-held in a `builtin.module` operation whose location is `moduleLoc`.
+{-| Returns the whole bytecode file: every operation added to the
+`StreamTables`, in the order they were added, held in one `builtin.module`
+operation whose location is `moduleLoc`.
 
-The file is the header (the magic number, the version, and the producer name
-`eco`), then the string, dialect, attribute and type, and attribute and type
-offset sections, the IR section, and resource and resource offset sections that
-declare no resources.
+`producer` names the program that wrote the file, such as `"my-compiler 1.2"`.
+MLIR keeps it only to report it alongside any error it meets while reading the
+file. It is written as given, followed by a zero byte that ends it, so a
+`producer` holding a zero character is cut short there.
 
-`moduleLoc` is looked up in the tables but not added to them. It is found if it
-has the name and start of `Mlir.Loc.unknown`, which the tables always hold, or
-of a location that some added operation carries, since
-`Mlir.Bytecode.AttrType.locIndex` ignores a location's end; otherwise it is
-written as -1.
+The file starts with a header of MLIR's magic number, bytecode version 4 and
+the producer. Then come the string, dialect,
+and attribute and type sections, the IR section holding the operations, and
+resource sections that declare no resources.
+
+`moduleLoc` is looked up in the tables but not added to them. It is found if
+it has the name and start of `Mlir.Loc.unknown`, which the tables always hold,
+or of the location of an operation added or nested in one, whatever its end;
+otherwise it is written as -1, and the file is corrupt.
 
 -}
-assembleModule : StreamTables -> Loc -> Bytes
-assembleModule (StreamTables st) moduleLoc =
+assembleModule : String -> StreamTables -> Loc -> Bytes
+assembleModule producer (StreamTables st) moduleLoc =
     let
         stringTable =
             st.stringTable
@@ -202,9 +227,9 @@ assembleModule (StreamTables st) moduleLoc =
         attrTypeTable =
             AttrType.finalizeStreamAccum st.attrAccum
 
-        -- A dialect that only attributes or types belong to, such as the
-        -- dialect of an `OpaqueAttr`, is numbered after every dialect an
-        -- operation name brought in.
+        -- A dialect that only attributes or types bring in, such as an
+        -- `OpaqueAttr`'s, is numbered here, after every dialect of an
+        -- operation name.
         dialectRegistry =
             finalizeDialectBuilder
                 (List.foldl addDialect st.dialectBuilder (AttrType.entryDialects attrTypeTable))
@@ -228,7 +253,7 @@ assembleModule (StreamTables st) moduleLoc =
             , encodeVarInt bytecodeVersion
 
             -- Producer string, written inline and NUL-terminated
-            , BE.string "eco"
+            , BE.string producer
             , BE.unsignedInt8 0x00
             , Section.encodeSection Section.sectionId.string stringSectionBody
             , Section.encodeSection Section.sectionId.dialect dialectSectionBody
@@ -243,6 +268,10 @@ assembleModule (StreamTables st) moduleLoc =
 
 
 {-| The version of the MLIR bytecode format that the file header declares.
+
+The dialect and IR sections are always written in layouts that assume
+version 4, whatever the value here, so they must be changed together.
+
 -}
 bytecodeVersion : Int
 bytecodeVersion =
@@ -260,8 +289,8 @@ operations already encoded in `encodedOpsNewestFirst`, written oldest first.
 
 The module operation has one isolated region, written in an IR section of its
 own. The region has one block with no arguments, and is written as defining no
-values, which is right only while none of the operations has results. Laid
-out, the section is:
+values, which matches each operation having been encoded with no values in
+scope. Laid out, the section is:
 
     u8 ir, varint irBodyLen,
         blockHeader, moduleNameIdx, 0x10, moduleLocIdx, regionEncoding,
@@ -270,15 +299,16 @@ out, the section is:
 
 Both lengths are worked out from `varIntWidth` and the widths of the operation
 bytes, instead of by encoding the contents and measuring them as
-`Mlir.Bytecode.Section.encodeSection` does. The bytes are those
-`encodeSection` would write, since it puts nothing between a section's length
-and its contents.
+`Section.encodeSection`, which frames the other sections, does. The bytes are
+those `Section.encodeSection` would write, since it puts nothing between a
+section's length and its contents.
 
 -}
 irSection : DialectRegistry -> AttrTypeTable -> Int -> List Bytes -> Loc -> BE.Encoder
 irSection dialectReg attrTypeTable numOps encodedOpsNewestFirst moduleLoc =
     let
-        -- Block header (numOps << 1) | hasArgs: one op, the module, no arguments.
+        -- Block header (numOps << 1) | hasArgs: one op, the module, with no
+        -- arguments.
         blockHeaderValue =
             Bitwise.shiftLeftBy 1 1
 

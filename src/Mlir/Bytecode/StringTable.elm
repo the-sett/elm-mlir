@@ -1,28 +1,39 @@
-module Mlir.Bytecode.StringTable exposing (StringTable, indexOf, encode, addString, empty, collectOp, splitDialect, opaqueAttrDialect)
+module Mlir.Bytecode.StringTable exposing
+    ( StringTable, indexOf, encode, addString, empty, collectOp, splitDialect
+    , opaqueAttrDialect
+    )
 
-{-| MLIR bytecode refers to many of its strings, such as dialect names,
-operation names and the text of string attributes, by their index in one string
-section, and this module builds that section and writes it.
+{-| MLIR bytecode refers to many of its strings, such as dialect names, the
+parts of operation names and the text of string attributes, by their index in
+one string section. This module builds that section, the _string table_, and
+writes it.
 
 A `StringTable` gives each distinct string an index. Indices are handed out
 from 0 in the order strings are first added, and adding a string that is
 already there changes nothing. `encode` writes the strings in that same order,
-so a string's index is its position in the section. An index never changes once
-given, so it can be written before the table is complete.
+so a string's index is its position in the section, and an index never changes
+once given.
 
-`collectOp` walks an operation and adds the strings found in it.
+`collectOp` walks an operation and adds the strings its docstring lists. The
+module also decides which dialect a name belongs to: `splitDialect` splits an
+operation or type name at its first `.`, and `opaqueAttrDialect` gives the
+dialect name this writer files an `OpaqueAttr` under.
+
 Nothing checks that a string being looked up was added: `indexOf` then returns
--1, which `Mlir.Bytecode.VarInt.encodeVarInt` writes like any other number, so
-a missed string makes a corrupt file rather than an error.
+-1, and the negative number written from it is not rejected
+(`Mlir.Bytecode.VarInt.encodeVarInt` writes it in nine bytes), so a missed
+string makes a corrupt file rather than an error.
 
 The text of a `StringAttr` keeps its escape sequences written out, as
 `Mlir.Mlir.MlirAttr` describes. The table stores and looks up strings as they
 are given, and `encode` replaces the escapes with the characters they stand for
 only as it writes each string. It does this to every string in the table,
-whatever it came from. Two escaped spellings of the same text are therefore two
-entries.
+whatever it came from: dialect names, the parts of operation names, attribute
+names, symbol names and file names as well as `StringAttr` text. Two escaped
+spellings of the same text are therefore two entries.
 
 @docs StringTable, indexOf, encode, addString, empty, collectOp, splitDialect
+@docs opaqueAttrDialect
 
 -}
 
@@ -87,8 +98,9 @@ addString s (StringTable st) =
 
 {-| Returns the index of `s` in the table, or -1 if `s` was never added.
 
-`Mlir.Bytecode.VarInt.encodeVarInt` does not reject a -1; it writes it in the
-9-byte form, so an index taken for a missing string corrupts the file.
+`Mlir.Bytecode.VarInt.encodeVarInt` does not reject a negative number; it
+writes it in the 9-byte form, so an index taken for a missing string refers to
+no string and corrupts the file.
 
 -}
 indexOf : String -> StringTable -> Int
@@ -106,18 +118,21 @@ indexOf s (StringTable st) =
 For each operation these are, in order: the part of its name before the first
 `.`, which is its dialect, and the rest of its name (a name with no `.` is
 added whole, together with the empty string); each attribute's name and the
-strings in its value; the strings in its result types; and the file name of its
-location, which for `Mlir.Loc.unknown` is `"unknown"`. Its regions follow,
-each entry block first and then the other blocks in their stored order, and in
-each block the argument types, the body operations and the terminator.
+strings in its value, attribute by attribute in name order; the strings in its
+result types; and the file name of its location, which for `Mlir.Loc.unknown`
+is `"unknown"`. Its regions follow, each entry block first and then the other
+blocks in their stored order, and in each block the argument types, the body
+operations and the terminator.
 
 An attribute value contributes the text of a `StringAttr` or `SymbolRefAttr`,
 `"private"` for a `VisibilityAttr`, the strings in the type of a `TypeAttr` or
-`TypedFloatAttr`, and those of every element of an `ArrayAttr`. The type an
-`IntAttr` or `ArrayAttr` carries is not visited. A type contributes strings
-only through a `NamedStruct`, which adds its dialect, the text before the
-first `.`, and its full name. Operand names and successor labels are not
-added.
+`TypedFloatAttr`, those of every element of an `ArrayAttr`, each name and
+value of a `DictAttr`, in name order, and the dialect of an `OpaqueAttr`, as
+`opaqueAttrDialect` gives it. The type an `IntAttr` or `ArrayAttr` carries is
+not visited. A type contributes strings only through a `NamedStruct`, which
+adds its dialect, as `splitDialect` gives it, and its full name, and through
+the types inside a `FunctionType`. Operand names, successor labels
+and block labels are not added.
 
 -}
 collectOp : MlirOp -> StringTable -> StringTable
@@ -167,10 +182,11 @@ splitDialect name =
             ( name, "" )
 
 
-{-| Returns the dialect of an `OpaqueAttr`'s text: the name after its leading
-`#`, up to the first `.` or `<`, so `#mosh<ape[2]>` gives `mosh` and
-`#M.device_ref<...>` gives `M`. Text that does not start with `#` is a builtin
-attribute, and gives `builtin`.
+{-| Returns the dialect name this writer files an `OpaqueAttr`'s text under,
+read from the text itself: the text after its leading `#`, up to the first `.`
+or `<`, or to the end if it has neither. So
+`#llvm.linkage<internal>` gives `llvm` and `#mydialect<...>` gives
+`mydialect`. Text that does not start with `#` gives `builtin`.
 -}
 opaqueAttrDialect : String -> String
 opaqueAttrDialect text =
@@ -212,8 +228,9 @@ collectAttrEntry key attr st =
 {-| Adds the strings in an attribute value: the text of a `StringAttr` or
 `SymbolRefAttr`, `"private"` for a `VisibilityAttr`, the strings in the type of
 a `TypeAttr` or `TypedFloatAttr`, those of every element of an `ArrayAttr`,
-each name and value of a `DictAttr`, and the dialect of an `OpaqueAttr`. The
-type an `IntAttr` or `ArrayAttr` carries is not visited.
+each name and value of a `DictAttr`, and the dialect of an `OpaqueAttr`, as
+`opaqueAttrDialect` gives it. The type an `IntAttr` or `ArrayAttr` carries is
+not visited.
 -}
 collectAttr : MlirAttr -> StringTable -> StringTable
 collectAttr attr st =
@@ -252,9 +269,9 @@ collectAttr attr st =
             addString (opaqueAttrDialect s) st
 
 
-{-| Adds the strings in a type. Only a `NamedStruct` has any: its dialect, the
-text before the first `.`, and its full name. A `FunctionType` adds those of
-its input and result types.
+{-| Adds the strings in a type. Only a `NamedStruct` has any of its own: its
+dialect, as `splitDialect` gives it, and its full name. A `FunctionType`
+adds those of its input types and then of its result types.
 -}
 collectType : MlirType -> StringTable -> StringTable
 collectType ty st =
@@ -327,7 +344,7 @@ collectBlock blk st =
 
 
 {-| Creates an encoder for the contents of the string section, without the
-section's own header.
+section's own id and length.
 
 It writes the number of strings, then each string's length in bytes, last
 string first, then the strings themselves in index order, each followed by a
@@ -335,10 +352,17 @@ zero byte. Each length counts that zero byte. The numbers are PrefixVarInts
 (see `Mlir.Bytecode.VarInt`).
 
 Each string is written with its escape sequences replaced by the characters
-they stand for: `\n`, `\t`, `\\`, `\"` and `\'`; `\u` and four hex digits,
-which becomes the character with that code; and `\0` and two hex digits,
-likewise. A backslash that starts anything else, such as `\r`, is written as it
-is. The lengths are measured on the strings as written, with
+they stand for. `\n`, `\r`, `\t`, `\\`, `\"` and `\'` become a newline, a
+carriage return, a tab, a backslash, a double quote and a single quote. `\u`
+followed by four hex digits becomes the character with that code; a `\u`
+escape for one half of a UTF-16 surrogate pair is converted on its own, so a
+half without its partner does not give a valid character. `\0` followed by two more hex
+digits, four characters in all, becomes the character with that code, so
+`\00A` is a newline. A backslash that starts anything else, such as `\x` or
+`\41`, or a `\u` or `\0` not followed by the hex digits it needs, is written as
+it is.
+
+The lengths are measured on the strings as written, with
 `Bytes.Encode.getStringWidth`, the function `Bytes.Encode.string` sizes its own
 output with, so each length matches the bytes that follow.
 
@@ -390,15 +414,17 @@ unescapeString s =
 {-| Returns `s` with each escape sequence replaced by the character it stands
 for.
 
-`\n`, `\r`, `\t`, `\\`, `\"` and `\'` become a newline, a carriage return, a tab, a
-backslash, a double quote and a single quote. `\u` followed by four hex digits becomes the
-character with that code. Each such escape is converted on its own; a
-character above U+FFFF arrives as two escapes, one for each half of a UTF-16
-surrogate pair, and the two halves end up next to each other in the result.
-`\0` followed by two hex digits becomes the character with that code.
+`\n`, `\r`, `\t`, `\\`, `\"` and `\'` become a newline, a carriage return, a
+tab, a backslash, a double quote and a single quote. `\u` followed by four hex
+digits becomes the character with that code. Each such escape is converted on
+its own, so a character above U+FFFF written as two escapes, one for each half
+of a UTF-16 surrogate pair, becomes the two halves next to each other.
+`\0` followed by two more hex digits becomes the character with that code, so
+`\00A` is a newline, while `\0A` at the end of the string or before a
+character that is not a hex digit is kept.
 
-A backslash that starts anything else, including `\u` or `\0` without enough
-hex digits after it, is kept, and the text after it is read as usual.
+A backslash that starts anything else, including a `\u` or `\0` not followed
+by the hex digits it needs, is kept, and the text after it is read as usual.
 
 -}
 unescapeStringSlow : String -> String

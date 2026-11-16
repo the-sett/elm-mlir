@@ -66,7 +66,7 @@ suite =
         , Test.test "bytecode" <|
             \_ ->
                 StreamEncode.collectAndEncodeOps testModule.body StreamEncode.emptyStreamTables
-                    |> (\tables -> StreamEncode.assembleModule tables testModule.loc)
+                    |> (\tables -> StreamEncode.assembleModule "elm-mlir-tests" tables testModule.loc)
                     |> BD.decode magic
                     |> Expect.equal (Just [ 0x4D, 0x4C, 0xEF, 0x52 ])
         , Test.test "variable-length integer widths" <|
@@ -201,7 +201,7 @@ probeOp =
         [ ( "%p", I8 ), ( "%q", NamedStruct "plain" ) ]
         [ ( "int8", IntAttr (Just I8) 5 )
         , ( "intFloat", IntAttr (Just F64) 1 )
-        , ( "intNamed", IntAttr (Just (NamedStruct "eco.value")) 2 )
+        , ( "intNamed", IntAttr (Just (NamedStruct "test.value")) 2 )
         , ( "big", IntAttr (Just I64) 0x1000000000000000 )
         , ( "negZero", TypedFloatAttr -0.0 F64 )
         , ( "negative", TypedFloatAttr -1.5 F64 )
