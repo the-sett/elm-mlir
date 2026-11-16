@@ -3,7 +3,7 @@
     "name": "the-sett/elm-mlir",
     "summary": "Build MLIR programs in Elm and write them as MLIR text or bytecode",
     "license": "BSD-3-Clause",
-    "version": "5.0.0",
+    "version": "6.0.0",
     "exposed-modules": [
         "Mlir.Mlir",
         "Mlir.Loc",
